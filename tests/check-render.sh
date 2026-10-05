@@ -51,9 +51,26 @@ if "$ROOT/swangate" bogus >/dev/null 2>&1; then fail "unknown command should fai
 for sub in install issue revoke status; do
   "$ROOT/swangate" "$sub" --help | grep -q "Usage: swangate ${sub}" || fail "${sub} --help"
 done
-expect_fail "install without domain" "$ROOT/swangate" install --ipv6 2001:db8::1
+expect_fail "install without domain" "$ROOT/swangate" install --ipv6 2001:db8::1 </dev/null
 expect_fail "bad backend" "$ROOT/swangate" install --domain vpn.example.com --ipv6 2001:db8::1 --backend nope
 expect_fail "issue without name" "$ROOT/swangate" issue
+VPN_DOMAIN=
+VPN_EMAIL=
+prompt_install_inputs <<'EOF'
+vpn.example.com
+admin@example.com
+EOF
+expect_eq "prompt domain" "$VPN_DOMAIN" "vpn.example.com"
+expect_eq "prompt email" "$VPN_EMAIL" "admin@example.com"
+VPN_DOMAIN=vpn.example.com
+VPN_EMAIL=
+prompt_install_inputs <<'EOF'
+
+EOF
+expect_eq "prompt keeps domain" "$VPN_DOMAIN" "vpn.example.com"
+expect_eq "prompt skip email" "$VPN_EMAIL" ""
+unset VPN_DOMAIN VPN_EMAIL
+"$ROOT/swangate" install --help | grep -q 'prompted interactively' || fail "install help mentions interactive prompts"
 ok
 
 # Validators.

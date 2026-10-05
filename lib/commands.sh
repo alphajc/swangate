@@ -28,18 +28,19 @@ EOF
 
 usage_install() {
   cat <<'EOF'
-Usage: swangate install --domain NAME [options]
+Usage: swangate install [--domain NAME] [options]
 
 Install StrongSwan IKEv2 with a Let's Encrypt server certificate and a local
 CA for client certificates. Safe to run again.
 
-Required:
-  --domain NAME          VPN hostname, already pointed at this server
+On a terminal, missing --domain / --email are prompted interactively.
+Non-interactive runs still need --domain (or VPN_DOMAIN).
 
 Options:
+  --domain NAME          VPN hostname, already pointed at this server
   --ipv6 ADDRESS         IPv6 address already configured on this server
                          (default: detect from DNS AAAA or the host)
-  --email ADDRESS        Let's Encrypt contact email
+  --email ADDRESS        Let's Encrypt contact email (optional)
   --interface NAME       Outbound interface for NAT (default: the interface
                          that owns the chosen IPv6)
   --ca-country CC        Client CA country (default: CN)
@@ -59,6 +60,21 @@ Environment variables (flags override them):
   VPN_DOMAIN VPN_IPV6 VPN_EMAIL VPN_INTERFACE VPN_CA_COUNTRY VPN_CA_ORG
   VPN_POOL_V4 VPN_POOL_V6 VPN_DNS VPN_CLIENTS_DIR
 EOF
+}
+
+# Read missing install inputs from stdin. Called only when stdin is a TTY.
+prompt_install_inputs() {
+  local reply
+  if [[ -z "${VPN_DOMAIN:-}" ]]; then
+    printf 'VPN domain (AAAA must point at this server): ' >&2
+    IFS= read -r reply || true
+    VPN_DOMAIN="${reply}"
+  fi
+  if [[ -z "${VPN_EMAIL:-}" ]]; then
+    printf "Let's Encrypt email (optional, Enter to skip): " >&2
+    IFS= read -r reply || true
+    VPN_EMAIL="${reply}"
+  fi
 }
 
 usage_issue() {
@@ -332,7 +348,10 @@ cmd_install() {
     shift "$OPT_SHIFT"
   done
 
-  [[ -n "$VPN_DOMAIN" ]] || die "Missing --domain. Run 'swangate install --help'."
+  if [[ -z "$VPN_DOMAIN" || -z "$VPN_EMAIL" ]] && [[ -t 0 ]]; then
+    prompt_install_inputs
+  fi
+  [[ -n "$VPN_DOMAIN" ]] || die "Missing --domain. Pass --domain or run 'swangate install' in a terminal."
   case "$backend_arg" in auto|ipsec|swanctl) ;; *) die "Unknown --backend: ${backend_arg}" ;; esac
   case "$firewall_arg" in auto|firewalld|iptables|nftables) ;; *) die "Unknown --firewall: ${firewall_arg}" ;; esac
   case "$dataplane_arg" in auto|kernel|libipsec) ;; *) die "Unknown --dataplane: ${dataplane_arg}" ;; esac
