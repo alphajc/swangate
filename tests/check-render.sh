@@ -222,14 +222,18 @@ ok
 # Firewall rules.
 rules="$(iptables_rules kernel 10.10.10.0/24 fd00:10:10::/64 eth0)"
 grep -q 'iptables filter FORWARD -m policy --pol ipsec --dir in -j ACCEPT' <<<"$rules" || fail "v4 policy"
-grep -q 'ip6tables nat POSTROUTING -s fd00:10:10::/64 -o eth0 -j MASQUERADE' <<<"$rules" || fail "v6 nat"
+grep -q 'ip6tables nat POSTROUTING -s fd00:10:10::/64 -o eth0 -m policy --dir out --pol none -j MASQUERADE' <<<"$rules" || fail "v6 nat"
+grep -q 'iptables filter INPUT -m conntrack --ctstate INVALID -j DROP' <<<"$rules" || fail "v4 invalid"
+grep -q 'iptables filter FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT' <<<"$rules" || fail "v4 established"
 grep -q 'ip6tables mangle FORWARD .*TCPMSS' <<<"$rules" || fail "v6 mss"
 rules="$(iptables_rules libipsec 10.10.10.0/24 fd00:10:10::/64 eth0)"
 grep -q 'iptables filter FORWARD -i ipsec0 -j ACCEPT' <<<"$rules" || fail "libipsec forward"
 if grep -q -- '--pol ipsec' <<<"$rules"; then fail "libipsec must not use policy match"; fi
 nft_text="$(nftables_ruleset kernel 10.10.10.0/24 fd00:10:10::/64 eth0)"
 grep -q 'meta secpath exists accept' <<<"$nft_text" || fail "nft secpath"
-grep -q 'ip6 saddr fd00:10:10::/64 oifname "eth0" masquerade' <<<"$nft_text" || fail "nft v6 nat"
+grep -q 'ip6 saddr fd00:10:10::/64 oifname "eth0" rt ipsec missing masquerade' <<<"$nft_text" || fail "nft v6 nat"
+grep -q 'ct state invalid drop' <<<"$nft_text" || fail "nft invalid"
+grep -q 'ct state { established, related } accept' <<<"$nft_text" || fail "nft established"
 grep -q 'udp dport { 500, 4500 } accept' <<<"$nft_text" || fail "nft ports"
 grep -q 'maxseg size set rt mtu' <<<"$nft_text" || fail "nft mss"
 if grep -q 'maxseg' <<<"$(nftables_ruleset kernel 10.10.10.0/24 fd00:10:10::/64 eth0 no)"; then
@@ -237,9 +241,47 @@ if grep -q 'maxseg' <<<"$(nftables_ruleset kernel 10.10.10.0/24 fd00:10:10::/64 
 fi
 grep -q 'iifname "ipsec0" accept' <<<"$(nftables_ruleset libipsec 10.10.10.0/24 fd00:10:10::/64 eth0)" \
   || fail "nft libipsec"
-if have_cmd nft && nft -c -f - <<<"$nft_text" >/dev/null 2>&1; then
+if have_cmd nft; then
+  sudo nft -c -f - <<<"$nft_text" >/dev/null || fail "nft ruleset rejected"
+  sudo nft -c -f - <<<"$(nftables_ruleset libipsec 10.10.10.0/24 fd00:10:10::/64 eth0)" >/dev/null \
+    || fail "nft libipsec ruleset rejected"
   ok
 fi
+
+# Kernel settings. BBR and conntrack are optional and passed in explicitly.
+sysctl_text="$(sysctl_settings eth0 no no)"
+grep -q 'net.ipv4.ip_forward = 1' <<<"$sysctl_text" || fail "sysctl forward"
+grep -q 'net.ipv4.conf.all.rp_filter = 0' <<<"$sysctl_text" || fail "sysctl rp_filter"
+grep -q 'net.ipv4.conf.eth0.rp_filter = 0' <<<"$sysctl_text" || fail "sysctl iface rp_filter"
+grep -q 'net.ipv4.conf.all.src_valid_mark = 1' <<<"$sysctl_text" || fail "sysctl src_valid_mark"
+grep -q 'net.ipv6.conf.all.accept_ra = 2' <<<"$sysctl_text" || fail "sysctl accept_ra"
+grep -q 'net.ipv6.conf.eth0.accept_ra = 2' <<<"$sysctl_text" || fail "sysctl iface accept_ra"
+grep -q 'net.ipv6.conf.eth0.forwarding = 1' <<<"$sysctl_text" || fail "sysctl iface forwarding"
+grep -q 'net.ipv4.conf.all.send_redirects = 0' <<<"$sysctl_text" || fail "sysctl send_redirects"
+grep -q 'net.ipv6.conf.all.accept_redirects = 0' <<<"$sysctl_text" || fail "sysctl v6 redirects"
+grep -q 'net.ipv4.tcp_mtu_probing = 1' <<<"$sysctl_text" || fail "sysctl mtu probing"
+if grep -q 'tcp_congestion_control' <<<"$sysctl_text"; then fail "bbr omitted unless requested"; fi
+if grep -q 'nf_conntrack_max' <<<"$sysctl_text"; then fail "conntrack omitted unless requested"; fi
+sysctl_extra="$(sysctl_settings 'eth0.10' yes yes)"
+grep -q 'net.ipv4.conf.eth0/10.rp_filter = 0' <<<"$sysctl_extra" || fail "vlan sysctl path"
+grep -q 'net.ipv6.conf.eth0/10.accept_ra = 2' <<<"$sysctl_extra" || fail "vlan accept_ra"
+grep -q 'net.core.default_qdisc = fq' <<<"$sysctl_extra" || fail "bbr qdisc"
+grep -q 'net.ipv4.tcp_congestion_control = bbr' <<<"$sysctl_extra" || fail "bbr"
+grep -q 'net.netfilter.nf_conntrack_max = 262144' <<<"$sysctl_extra" || fail "conntrack max"
+grep -q 'net.netfilter.nf_conntrack_udp_timeout_stream = 300' <<<"$sysctl_extra" || fail "udp timeout"
+ok
+
+moddir="${tmp}/modprobe.d"
+mkdir -p "$moddir"
+printf 'install esp4 /bin/false\ninstall esp6 /usr/bin/false\n' >"${moddir}/disable-esp.conf"
+printf 'install e1000 /sbin/modprobe --ignore-install e1000\n' >"${moddir}/other.conf"
+esp_warn="$(IKEV2_MODPROBE_DIRS="$moddir" warn_blocked_esp_modules 2>&1 || true)"
+grep -q 'esp4 is disabled' <<<"$esp_warn" || fail "esp4 warning"
+grep -q 'esp6 is disabled' <<<"$esp_warn" || fail "esp6 warning"
+if grep -q 'e1000' <<<"$esp_warn"; then fail "unrelated modprobe line warned"; fi
+esp_ok="$(IKEV2_MODPROBE_DIRS="${tmp}/no-such-modprobe" warn_blocked_esp_modules 2>&1 || true)"
+[[ -z "$esp_ok" ]] || fail "missing modprobe dir should be quiet"
+ok
 
 # StrongSwan configuration for both backends.
 VPN_DOMAIN="vpn.example.com"
@@ -260,9 +302,13 @@ SERVER_KEY=/etc/ipsec.d/private/server.key
 write_ipsec_secrets "${tmp}/ipsec.secrets" ECDSA
 grep -q 'rightauth=pubkey' "${tmp}/ipsec.conf" || fail "missing pubkey auth"
 grep -q 'rightsourceip=10.10.10.0/24,fd00:10:10::/64' "${tmp}/ipsec.conf" || fail "missing pools"
-grep -q 'esp=aes256-sha256,aes128-sha256,aes256gcm16,aes128gcm16,aes256-sha1' "${tmp}/ipsec.conf" || fail "missing esp"
+grep -q 'esp=aes256-sha256-modp2048,aes128-sha256-modp2048,aes256gcm16-modp2048,aes128gcm16-modp2048,aes256-sha256,aes128-sha256,aes256gcm16,aes128gcm16,aes256-sha1' "${tmp}/ipsec.conf" || fail "missing esp"
+grep -q 'dpddelay=30s' "${tmp}/ipsec.conf" || fail "dpd delay"
+grep -q 'dpdtimeout=120s' "${tmp}/ipsec.conf" || fail "dpd timeout"
+grep -q 'ikelifetime=24h' "${tmp}/ipsec.conf" || fail "ike lifetime"
+grep -q 'lifetime=8h' "${tmp}/ipsec.conf" || fail "child lifetime"
 grep -q 'leftcert=server.crt' "${tmp}/ipsec.conf" || fail "missing leaf cert"
-if grep -Eq 'timeout=|eap-mschapv2' "${tmp}/ipsec.conf"; then fail "removed setting in ipsec.conf"; fi
+if grep -Eq '(^|[^a-z])timeout=|eap-mschapv2' "${tmp}/ipsec.conf"; then fail "removed setting in ipsec.conf"; fi
 if grep -q 'RSA' "${tmp}/ipsec.secrets"; then fail "ECDSA secrets include RSA"; fi
 
 write_swanctl_conf "${tmp}/swanctl.conf"
@@ -270,8 +316,16 @@ sw="$(cat "${tmp}/swanctl.conf")"
 grep -q 'auth = pubkey' <<<"$sw" || fail "swanctl pubkey"
 grep -q 'cacerts = vpn_client_ca.crt' <<<"$sw" || fail "swanctl cacerts"
 grep -q 'local_ts = 0.0.0.0/0,::/0' <<<"$sw" || fail "swanctl full tunnel"
-grep -q 'esp_proposals = aes256-sha256,aes128-sha256,aes256gcm16,aes128gcm16,aes256-sha1,default' <<<"$sw" \
+grep -q 'esp_proposals = aes256-sha256-modp2048,aes128-sha256-modp2048,aes256gcm16-modp2048,aes128gcm16-modp2048,aes256-sha256,aes128-sha256,aes256gcm16,aes128gcm16,aes256-sha1' <<<"$sw" \
   || fail "swanctl esp"
+grep -q 'proposals = aes256-sha256-modp2048,aes128-sha256-modp2048,aes256-sha1-modp2048$' <<<"$sw" \
+  || fail "swanctl ike proposals"
+if grep -q ',default' <<<"$sw"; then fail "swanctl must not include default proposals"; fi
+grep -q 'dpd_delay = 30s' <<<"$sw" || fail "swanctl dpd"
+grep -q 'dpd_timeout = 120s' <<<"$sw" || fail "swanctl dpd timeout"
+grep -q 'rekey_time = 24h' <<<"$sw" || fail "swanctl ike rekey"
+grep -q 'life_time = 8h' <<<"$sw" || fail "swanctl child lifetime"
+grep -q 'rekey_time = 7h' <<<"$sw" || fail "swanctl child rekey"
 grep -q 'addrs = fd00:10:10::/64' <<<"$sw" || fail "swanctl v6 pool"
 grep -q 'dns = 2606:4700:4700::1111' <<<"$sw" || fail "swanctl v6 dns"
 grep -q 'dns = 1.1.1.1,8.8.8.8' <<<"$sw" || fail "swanctl v4 dns"

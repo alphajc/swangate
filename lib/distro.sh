@@ -512,11 +512,35 @@ select_backend() {
   log "Using the ${VPN_BACKEND} backend through service ${VPN_SERVICE}."
 }
 
+# Some cloud images disable ESP with "install esp4 /bin/false". Warn instead of failing quietly.
+warn_blocked_esp_modules() {
+  local dir conf mod
+  local -a dirs=(/etc/modprobe.d /run/modprobe.d /usr/local/lib/modprobe.d /usr/lib/modprobe.d /lib/modprobe.d)
+  local install_re='^[[:space:]]*install[[:space:]]+'
+  local false_re='/(usr/)?bin/false([[:space:]]|$)'
+  if [[ -n "${IKEV2_MODPROBE_DIRS:-}" ]]; then
+    read -r -a dirs <<<"$IKEV2_MODPROBE_DIRS"
+  fi
+  for dir in "${dirs[@]}"; do
+    [[ -d "$dir" ]] || continue
+    for conf in "$dir"/*.conf; do
+      [[ -f "$conf" ]] || continue
+      for mod in esp4 esp6; do
+        if grep -Eq "${install_re}${mod}[[:space:]]+${false_re}" "$conf"; then
+          warn "Kernel module ${mod} is disabled in ${conf}. IPsec data packets will fail until that line is removed."
+        fi
+      done
+    done
+  done
+}
+
 load_kernel_modules() {
   local -a modules=(esp4 esp6 xfrm_user xfrm_algo af_key authenc cryptd aes sha256 sha512 gcm cbc tun
-    ip6table_nat iptable_nat nf_nat ip6table_mangle iptable_mangle xt_policy xt_TCPMSS)
+    ip6table_nat iptable_nat nf_nat ip6table_mangle iptable_mangle xt_policy xt_TCPMSS
+    nf_conntrack xt_conntrack tcp_bbr)
   local -a loaded=()
   local mod
+  warn_blocked_esp_modules
   if ! have_cmd modprobe; then
     warn "modprobe is not available. Skipping kernel module loading."
     return 0
