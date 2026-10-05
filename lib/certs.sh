@@ -48,7 +48,11 @@ set_swan_paths() {
   esac
   SERVER_CRT="${CERT_DIR}/server.crt"
   SERVER_KEY="${KEY_DIR}/server.key"
-  SERVER_CHAIN="${CACERT_DIR}/intermediate.crt"
+  # Keep the Let's Encrypt intermediate outside StrongSwan's CA directory.
+  # If it lives in cacerts/x509ca, charon sends CERT CERT and IKE_AUTH often
+  # needs fragmentation; many mobile IPv6 paths drop those fragments, so the
+  # phone keeps retrying while the server only shows DPD retransmits.
+  SERVER_CHAIN="${CONFIG_DIR}/server-chain.pem"
   CA_PUBLISHED_CRT="${CACERT_DIR}/vpn_client_ca.crt"
   CRL_PATH="${CRL_DIR}/vpn_client_ca.crl"
 }
@@ -73,6 +77,24 @@ detect_key_type() {
     printf 'RSA\n'
   else
     die "Unrecognized private key type in ${key}"
+  fi
+}
+
+# Apple IKEv2 CertificateType for a server certificate (RSA / ECDSA256 / ...).
+apple_certificate_type() {
+  local crt="$1"
+  local text
+  text="$(openssl x509 -in "$crt" -noout -text 2>/dev/null)" || die "Cannot read certificate ${crt}"
+  if grep -Eq 'Public Key Algorithm: (id-ecPublicKey|.*EC)' <<<"$text"; then
+    if grep -Eq 'ASN1 OID: secp384r1|NIST CURVE: P-384' <<<"$text"; then
+      printf 'ECDSA384\n'
+    elif grep -Eq 'ASN1 OID: secp521r1|NIST CURVE: P-521' <<<"$text"; then
+      printf 'ECDSA521\n'
+    else
+      printf 'ECDSA256\n'
+    fi
+  else
+    printf 'RSA\n'
   fi
 }
 
@@ -383,13 +405,16 @@ sync_server_cert() {
   [[ -f "${live}/cert.pem" ]] || die "Missing ${live}/cert.pem. Obtain a Let's Encrypt certificate first."
   [[ -f "${live}/privkey.pem" ]] || die "Missing ${live}/privkey.pem."
   [[ -f "${live}/chain.pem" ]] || die "Missing ${live}/chain.pem."
-  mkdir -p "$CERT_DIR" "$KEY_DIR" "$CACERT_DIR"
+  mkdir -p "$CERT_DIR" "$KEY_DIR" "$CACERT_DIR" "$CONFIG_DIR"
   chmod 700 "$KEY_DIR"
   cp -L "${live}/cert.pem" "$SERVER_CRT"
   cp -L "${live}/privkey.pem" "$SERVER_KEY"
   cp -L "${live}/chain.pem" "$SERVER_CHAIN"
   chmod 644 "$SERVER_CRT" "$SERVER_CHAIN"
   chmod 600 "$SERVER_KEY"
+  # Older installs put chain.pem in cacerts as intermediate.crt; remove it so
+  # charon stops sending the intermediate in IKE_AUTH.
+  rm -f "${CACERT_DIR}/intermediate.crt"
   cert_hash="$(pubkey_md5 cert "$SERVER_CRT")"
   key_hash="$(pubkey_md5 key "$SERVER_KEY")"
   if [[ -z "$cert_hash" || "$cert_hash" != "$key_hash" ]]; then
@@ -546,6 +571,7 @@ write_mobileconfig_xml() {
   local cert_uuid="$6"
   local vpn_uuid="$7"
   local profile_uuid="$8"
+  local cert_type="${9:-RSA}"
   cat >"$dest" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -578,6 +604,8 @@ write_mobileconfig_xml() {
             <dict>
                 <key>AuthenticationMethod</key>
                 <string>Certificate</string>
+                <key>CertificateType</key>
+                <string>${cert_type}</string>
                 <key>PayloadCertificateUUID</key>
                 <string>${cert_uuid}</string>
                 <key>RemoteAddress</key>

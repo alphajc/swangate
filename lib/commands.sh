@@ -534,10 +534,15 @@ cmd_issue() {
   chmod 600 "$p12" "$key"
   install -m 644 "$CA_CRT_PATH" "$ca_copy"
 
-  local p12_b64
+  local p12_b64 cert_type
   p12_b64="$(base64 "$p12" | tr -d '\r\n')"
+  if [[ -f "$SERVER_CRT" ]]; then
+    cert_type="$(apple_certificate_type "$SERVER_CRT")"
+  else
+    cert_type=RSA
+  fi
   write_mobileconfig_xml "$raw" "$name" "$VPN_DOMAIN" "$p12_pass" "$p12_b64" \
-    "$(new_uuid)" "$(new_uuid)" "$(new_uuid)"
+    "$(new_uuid)" "$(new_uuid)" "$(new_uuid)" "$cert_type"
 
   local signer="${LETSENCRYPT_DIR}/live/${VPN_DOMAIN}/cert.pem"
   local inkey="${LETSENCRYPT_DIR}/live/${VPN_DOMAIN}/privkey.pem"

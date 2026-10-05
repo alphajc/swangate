@@ -309,10 +309,12 @@ VPN_DNS="1.1.1.1,8.8.8.8,2606:4700:4700::1111"
 set_swan_paths ipsec /etc
 expect_eq "ipsec path" "$SWAN_CONF" /etc/ipsec.conf
 expect_eq "ipsec cacerts" "$CA_PUBLISHED_CRT" /etc/ipsec.d/cacerts/vpn_client_ca.crt
+expect_eq "ipsec chain outside cacerts" "$SERVER_CHAIN" "${IKEV2_CONFIG_DIR}/server-chain.pem"
 set_swan_paths swanctl /etc/strongswan
 expect_eq "fedora swanctl path" "$SWAN_CONF" /etc/strongswan/swanctl/conf.d/ikev2-vpn.conf
 expect_eq "fedora crl" "$CRL_PATH" /etc/strongswan/swanctl/x509crl/vpn_client_ca.crl
 expect_eq "fedora strongswan.d" "$STRONGSWAN_D" /etc/strongswan/strongswan.d
+expect_eq "swanctl chain outside x509ca" "$SERVER_CHAIN" "${IKEV2_CONFIG_DIR}/server-chain.pem"
 
 write_ipsec_conf "${tmp}/ipsec.conf"
 SERVER_KEY=/etc/ipsec.d/private/server.key
@@ -366,6 +368,25 @@ mkdir -p "$CERT_DIR" "$KEY_DIR" "$CACERT_DIR"
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 30 \
   -subj "/CN=${VPN_DOMAIN}" -keyout "$SERVER_KEY" -out "$SERVER_CRT" >/dev/null 2>&1
 expect_eq "server key type" "$(detect_key_type "$SERVER_KEY")" ECDSA
+# sync_server_cert must keep the LE chain out of StrongSwan's CA dir and remove
+# the legacy intermediate.crt that caused IKE_AUTH CERT CERT fragmentation.
+live="${LETSENCRYPT_DIR}/live/${VPN_DOMAIN}"
+mkdir -p "$live"
+cp "$SERVER_CRT" "${live}/cert.pem"
+cp "$SERVER_KEY" "${live}/privkey.pem"
+# Fake an intermediate distinct from the leaf.
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 30 \
+  -subj "/CN=Fake LE Intermediate" -keyout "${tmp}/int.key" -out "${live}/chain.pem" >/dev/null 2>&1
+: >"${CACERT_DIR}/intermediate.crt"
+sync_server_cert >/dev/null
+[[ -f "$SERVER_CHAIN" ]] || fail "server chain missing at ${SERVER_CHAIN}"
+[[ ! -e "${CACERT_DIR}/intermediate.crt" ]] || fail "legacy intermediate.crt must be removed"
+openssl x509 -in "$SERVER_CHAIN" -noout -subject | grep -q 'Fake LE Intermediate' \
+  || fail "chain not copied outside cacerts"
+case "$SERVER_CHAIN" in
+  */server-chain.pem) ;;
+  *) fail "unexpected SERVER_CHAIN path: ${SERVER_CHAIN}" ;;
+esac
 VPN_IPV6=2001:db8::1
 VPN_INTERFACE=eth0
 VPN_CLIENTS_DIR="${tmp}/clients"
@@ -400,7 +421,14 @@ import sys
 data = open(sys.argv[1], "rb").read()
 if data[:1] != b"\x30":
     raise SystemExit("not DER")
-for needle in (b"<key>IKEv2</key>", b"<string>Certificate</string>", b"<key>IPv6</key>", b"vpn.example.com"):
+for needle in (
+    b"<key>IKEv2</key>",
+    b"<string>Certificate</string>",
+    b"<key>CertificateType</key>",
+    b"<string>ECDSA256</string>",
+    b"<key>IPv6</key>",
+    b"vpn.example.com",
+):
     if needle not in data:
         raise SystemExit("missing %r" % needle)
 PY
@@ -421,8 +449,10 @@ grep -Eq 'bob +valid' <<<"$status_out" || fail "status shows bob"
 ok
 
 # Apple profile XML before signing.
+expect_eq "apple ecdsa type" "$(apple_certificate_type "$SERVER_CRT")" ECDSA256
 write_mobileconfig_xml "${tmp}/p.mobileconfig" alice "$VPN_DOMAIN" pass "QUJD" \
-  11111111-1111-1111-1111-111111111111 22222222-2222-2222-2222-222222222222 33333333-3333-3333-3333-333333333333
+  11111111-1111-1111-1111-111111111111 22222222-2222-2222-2222-222222222222 33333333-3333-3333-3333-333333333333 \
+  ECDSA256
 python3 - "${tmp}/p.mobileconfig" <<'PY' || fail "profile xml"
 import sys
 import xml.etree.ElementTree as ET
@@ -432,6 +462,8 @@ if text.count("<integer>1</integer>") != text.count("<key>PayloadVersion</key>")
     raise SystemExit("boolean fields must use true/false tags")
 if "<integer>0</integer>" in text:
     raise SystemExit("boolean fields must use true/false tags")
+if "<key>CertificateType</key>" not in text or "<string>ECDSA256</string>" not in text:
+    raise SystemExit("missing CertificateType")
 PY
 
 # get.sh installs from a tarball and runs the subcommand.
