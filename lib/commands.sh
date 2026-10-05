@@ -380,7 +380,9 @@ cmd_install() {
   VPN_CA_ORG="${VPN_CA_ORG:-IKEv2}"
   VPN_POOL_V4="${VPN_POOL_V4:-10.10.10.0/24}"
   VPN_POOL_V6="${VPN_POOL_V6:-fd00:10:10::/64}"
-  VPN_DNS="${VPN_DNS:-1.1.1.1,8.8.8.8,2606:4700:4700::1111}"
+  # Prefer one IPv4 + one IPv6 DNS. Extra CPRP DNS attributes inflate IKE_AUTH
+  # and push mobile IPv6 responses over the IKE fragmentation threshold.
+  VPN_DNS="${VPN_DNS:-1.1.1.1,2606:4700:4700::1111}"
   VPN_CLIENTS_DIR="${VPN_CLIENTS_DIR:-/root/vpn-clients}"
   VPN_CERTBOT_STAGING="${VPN_CERTBOT_STAGING:-0}"
   VPN_SKIP_CERTBOT="${VPN_SKIP_CERTBOT:-0}"
