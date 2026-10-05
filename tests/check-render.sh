@@ -518,7 +518,31 @@ expect_eq "apple client cert type" "$(apple_certificate_type "${VPN_CLIENTS_DIR}
 expect_eq "apple server ecdsa type" "$(apple_certificate_type "$SERVER_CRT")" ECDSA256
 expect_eq "server subject cn" "$(cert_common_name "$SERVER_CRT" subject)" "$VPN_DOMAIN"
 expect_eq "server issuer cn" "$(cert_common_name "$SERVER_CRT" issuer)" "Fake LE Intermediate"
-issuer_der_b64="$(openssl x509 -in "${LETSENCRYPT_DIR}/live/${VPN_DOMAIN}/chain.pem" -outform der | base64 | tr -d '\r\n')"
+expect_eq "ec curve for ECDSA256" "$(ec_curve_for_apple_type ECDSA256)" prime256v1
+expect_eq "ec curve for ECDSA384" "$(ec_curve_for_apple_type ECDSA384)" secp384r1
+expect_eq "ec curve for ECDSA521" "$(ec_curve_for_apple_type ECDSA521)" secp521r1
+issuer_der_b64="$(apple_issuer_der_b64 "$SERVER_CRT" "${LETSENCRYPT_DIR}/live/${VPN_DOMAIN}/chain.pem")"
+[[ -n "$issuer_der_b64" ]] || fail "apple_issuer_der_b64 empty"
+# Wrong intermediate CN must not be selected when the leaf issuer is YE2-like.
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 30 \
+  -subj "/CN=Wrong Intermediate" -keyout "${tmp}/wrong.key" -out "${tmp}/wrong-chain.pem" >/dev/null 2>&1
+if apple_issuer_der_b64 "$SERVER_CRT" "${tmp}/wrong-chain.pem" >/dev/null 2>&1; then
+  fail "apple_issuer_der_b64 must reject mismatched issuer CN"
+fi
+ok
+# P-384 server leaf => ECDSA384 client (not hard-coded P-256).
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp384r1 -nodes -days 30 \
+  -subj "/CN=P384 Issuer" -keyout "${tmp}/p384-iss.key" -out "${tmp}/p384-iss.crt" >/dev/null 2>&1
+openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:secp384r1 -nodes \
+  -subj "/CN=${VPN_DOMAIN}" -keyout "${tmp}/p384-server.key" -out "${tmp}/p384-server.csr" >/dev/null 2>&1
+openssl x509 -req -in "${tmp}/p384-server.csr" -CA "${tmp}/p384-iss.crt" -CAkey "${tmp}/p384-iss.key" \
+  -CAcreateserial -days 30 -out "${tmp}/p384-server.crt" >/dev/null 2>&1
+mkdir -p "${tmp}/p384client"
+SERVER_CRT="${tmp}/p384-server.crt" issue_client_cert p384client "${tmp}/p384client"
+expect_eq "p384 client type" "$(apple_certificate_type "${tmp}/p384client/p384client.crt")" ECDSA384
+# Restore ECDSA256 server path used by later checks.
+set_swan_paths swanctl "$swan"
+issuer_der_b64="$(apple_issuer_der_b64 "$SERVER_CRT" "${LETSENCRYPT_DIR}/live/${VPN_DOMAIN}/chain.pem")"
 write_mobileconfig_xml "${tmp}/p.mobileconfig" alice "$VPN_DOMAIN" pass "QUJD" \
   11111111-1111-1111-1111-111111111111 22222222-2222-2222-2222-222222222222 33333333-3333-3333-3333-333333333333 \
   ECDSA256 "Fake LE Intermediate" "$VPN_DOMAIN" "$issuer_der_b64" 44444444-4444-4444-4444-444444444444

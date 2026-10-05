@@ -80,10 +80,11 @@ detect_key_type() {
   fi
 }
 
-# Apple IKEv2 CertificateType for the server authentication algorithm.
-# iOS compares this to the server's AUTH method (e.g. DigitalSignatureECDSA256).
-# Using RSA here while the server has a Let's Encrypt ECDSA leaf fails with:
-# "not compatible with configuration RSASignature".
+# Apple IKEv2 CertificateType for a certificate's public key.
+# Per Apple MDM docs this describes PayloadCertificateUUID (the client identity).
+# In practice NEIKEv2Provider also rejects server AUTH that disagrees with it
+# (RSASignature vs DigitalSignatureECDSA256), so client and server leaves must
+# share the same Apple type.
 apple_certificate_type() {
   local crt="$1"
   local text
@@ -99,6 +100,46 @@ apple_certificate_type() {
   else
     printf 'RSA\n'
   fi
+}
+
+# OpenSSL curve name matching an Apple CertificateType.
+ec_curve_for_apple_type() {
+  case "$1" in
+    ECDSA256) printf 'prime256v1\n' ;;
+    ECDSA384) printf 'secp384r1\n' ;;
+    ECDSA521) printf 'secp521r1\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+# Prints base64(DER) of the PEM certificate in BUNDLE whose subject CN equals
+# the issuer CN of LEAF. Needed so ServerCertificateIssuerCommonName (YE2/E7)
+# matches the embedded com.apple.security.pkcs1 payload.
+apple_issuer_der_b64() {
+  local leaf="$1"
+  local bundle="$2"
+  local want tmp part cn
+  want="$(cert_common_name "$leaf" issuer)"
+  [[ -n "$want" ]] || return 1
+  [[ -f "$bundle" ]] || return 1
+  tmp="$(mktemp -d)"
+  # Split a PEM bundle into individual cert files.
+  awk -v dir="$tmp" '
+    /BEGIN CERTIFICATE/ { n++; f=sprintf("%s/%02d.pem", dir, n) }
+    f { print > f }
+    /END CERTIFICATE/ { f="" }
+  ' "$bundle"
+  for part in "$tmp"/*.pem; do
+    [[ -f "$part" ]] || continue
+    cn="$(cert_common_name "$part" subject 2>/dev/null || true)"
+    if [[ "$cn" == "$want" ]]; then
+      openssl x509 -in "$part" -outform der | base64 | tr -d '\r\n'
+      rm -rf "$tmp"
+      return 0
+    fi
+  done
+  rm -rf "$tmp"
+  return 1
 }
 
 # Prints the CN from a certificate subject or issuer (RFC2253).
@@ -514,12 +555,12 @@ verify_strongswan() {
 }
 
 # The SAN carries NAME because iOS and other clients send it as their IKE identity.
-# When the server leaf is ECDSA, issue an ECDSA client key too: Apple's single
-# CertificateType field must match both client signing and server AUTH.
+# When the server leaf is ECDSA, issue a matching ECDSA client key: Apple's
+# CertificateType must match PayloadCertificateUUID and also server AUTH.
 issue_client_cert() {
   local name="$1"
   local work_dir="$2"
-  local key crt csr ext old_umask server_type
+  local key crt csr ext old_umask server_type curve
   old_umask="$(umask)"
   key="${work_dir}/${name}.key"
   csr="${work_dir}/${name}.csr"
@@ -530,8 +571,8 @@ issue_client_cert() {
   if [[ -f "$SERVER_CRT" ]]; then
     server_type="$(apple_certificate_type "$SERVER_CRT")"
   fi
-  if [[ "$server_type" == ECDSA* ]]; then
-    openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+  if curve="$(ec_curve_for_apple_type "$server_type")"; then
+    openssl req -new -newkey ec -pkeyopt "ec_paramgen_curve:${curve}" -nodes \
       -keyout "$key" \
       -out "$csr" \
       -subj "/C=${VPN_CA_COUNTRY}/O=${VPN_CA_ORG}/CN=${name}" 2>/dev/null
