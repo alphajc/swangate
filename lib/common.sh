@@ -1,18 +1,32 @@
 #!/usr/bin/env bash
-# Shared helpers for the IPv6 IKEv2 installer. English only.
+# Shared helpers for the ikev2 command.
+# shellcheck disable=SC2034  # Globals are shared across the sourced libraries.
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   printf 'This file is meant to be sourced.\n' >&2
   exit 1
 fi
 
+CONFIG_DIR="${IKEV2_CONFIG_DIR:-/etc/ikev2-vpn}"
+STATE_DIR="${IKEV2_STATE_DIR:-/var/lib/ikev2-vpn}"
+LETSENCRYPT_DIR="${IKEV2_LETSENCRYPT_DIR:-/etc/letsencrypt}"
+MANAGED_MARK="managed-by: ikev2-vpn-installer"
+
 log() {
   printf '[ikev2] %s\n' "$*"
+}
+
+warn() {
+  printf '[ikev2] WARNING: %s\n' "$*" >&2
 }
 
 die() {
   printf '[ikev2] ERROR: %s\n' "$*" >&2
   exit 1
+}
+
+have_cmd() {
+  command -v "$1" >/dev/null 2>&1
 }
 
 require_root() {
@@ -21,28 +35,10 @@ require_root() {
   fi
 }
 
-require_ubuntu() {
-  local os_id os_version
-  [[ -r /etc/os-release ]] || die "Cannot read /etc/os-release. This installer requires Ubuntu."
-  os_id="$(. /etc/os-release && printf '%s' "${ID:-}")"
-  os_version="$(. /etc/os-release && printf '%s' "${VERSION_ID:-unknown}")"
-  if [[ "$os_id" != "ubuntu" ]]; then
-    die "This installer requires Ubuntu. Detected: ${os_id:-unknown}."
-  fi
-  case "$os_version" in
-    22.04|24.04)
-      log "Ubuntu ${os_version} detected."
-      ;;
-    *)
-      log "WARNING: Ubuntu ${os_version} is outside the tested 22.04 and 24.04 releases. Continuing."
-      ;;
-  esac
-}
-
 require_cmd() {
   local cmd
   for cmd in "$@"; do
-    command -v "$cmd" >/dev/null 2>&1 || die "Missing required command: $cmd"
+    have_cmd "$cmd" || die "Missing required command: $cmd"
   done
 }
 
@@ -114,34 +110,45 @@ if not raw:
     sys.exit(1)
 for item in raw.split(","):
     item = item.strip()
-    if not item or item != item.strip():
+    if not item:
         sys.exit(1)
     ipaddress.ip_address(item)
 PY
 }
 
-config_file() {
-  printf '%s\n' /etc/ikev2-vpn/config.env
+dns_for_family() {
+  local list="$1"
+  local family="$2"
+  python3 - "$list" "$family" <<'PY'
+import ipaddress, sys
+items = [i.strip() for i in sys.argv[1].split(",") if i.strip()]
+want = 4 if sys.argv[2] == "ipv4" else 6
+print(",".join(i for i in items if ipaddress.ip_address(i).version == want))
+PY
 }
 
+config_file() {
+  printf '%s/config.env\n' "$CONFIG_DIR"
+}
+
+CONFIG_KEYS=(
+  VPN_DOMAIN VPN_IPV6 VPN_INTERFACE VPN_EMAIL
+  VPN_CA_COUNTRY VPN_CA_ORG VPN_CA_CN VPN_CA_SUBJECT
+  VPN_POOL_V4 VPN_POOL_V6 VPN_DNS VPN_CLIENTS_DIR
+  VPN_DISTRO_FAMILY VPN_DISTRO_ID VPN_PKG_MANAGER VPN_SERVICE_MANAGER
+  VPN_BACKEND VPN_SERVICE VPN_SWAN_ETC VPN_FIREWALL VPN_DATAPLANE
+)
+
 save_config() {
-  local dest
+  local dest key
   dest="$(config_file)"
-  mkdir -p /etc/ikev2-vpn
-  umask 022
+  mkdir -p "$CONFIG_DIR"
+  chmod 755 "$CONFIG_DIR"
   {
-    printf 'VPN_DOMAIN=%q\n' "$VPN_DOMAIN"
-    printf 'VPN_IPV6=%q\n' "$VPN_IPV6"
-    printf 'VPN_INTERFACE=%q\n' "$VPN_INTERFACE"
-    printf 'VPN_EMAIL=%q\n' "${VPN_EMAIL:-}"
-    printf 'VPN_CA_COUNTRY=%q\n' "$VPN_CA_COUNTRY"
-    printf 'VPN_CA_ORG=%q\n' "$VPN_CA_ORG"
-    printf 'VPN_CA_CN=%q\n' "$VPN_CA_CN"
-    printf 'VPN_CA_SUBJECT=%q\n' "$VPN_CA_SUBJECT"
-    printf 'VPN_POOL_V4=%q\n' "$VPN_POOL_V4"
-    printf 'VPN_POOL_V6=%q\n' "$VPN_POOL_V6"
-    printf 'VPN_DNS=%q\n' "$VPN_DNS"
-    printf 'VPN_CLIENTS_DIR=%q\n' "$VPN_CLIENTS_DIR"
+    printf '# %s\n' "$MANAGED_MARK"
+    for key in "${CONFIG_KEYS[@]}"; do
+      printf '%s=%q\n' "$key" "${!key:-}"
+    done
   } >"$dest"
   chmod 644 "$dest"
 }
@@ -149,17 +156,24 @@ save_config() {
 load_config() {
   local dest
   dest="$(config_file)"
-  [[ -f "$dest" ]] || die "Missing ${dest}. Run install.sh first."
+  [[ -f "$dest" ]] || die "Missing ${dest}. Run 'ikev2 install' first."
   # shellcheck disable=SC1090
   source "$dest"
   [[ -n "${VPN_DOMAIN:-}" ]] || die "VPN_DOMAIN is missing from ${dest}"
   [[ -n "${VPN_CA_SUBJECT:-}" ]] || die "VPN_CA_SUBJECT is missing from ${dest}"
   [[ -n "${VPN_CLIENTS_DIR:-}" ]] || die "VPN_CLIENTS_DIR is missing from ${dest}"
+  VPN_BACKEND="${VPN_BACKEND:-ipsec}"
+  VPN_SWAN_ETC="${VPN_SWAN_ETC:-/etc}"
+  VPN_DATAPLANE="${VPN_DATAPLANE:-kernel}"
+  VPN_FIREWALL="${VPN_FIREWALL:-iptables}"
+  VPN_SERVICE_MANAGER="${VPN_SERVICE_MANAGER:-systemd}"
 }
 
 new_uuid() {
-  if command -v uuidgen >/dev/null 2>&1; then
+  if have_cmd uuidgen; then
     uuidgen
+  elif [[ -r /proc/sys/kernel/random/uuid ]]; then
+    cat /proc/sys/kernel/random/uuid
   else
     python3 -c 'import uuid; print(uuid.uuid4())'
   fi
@@ -186,5 +200,23 @@ find_ipv6_iface() {
     fi
     die "IPv6 ${want} is not configured on this host. Pass the address that is already assigned to the server."
   fi
-  printf '%s\n' "$found"
+  printf '%s\n' "${found%@*}"
+}
+
+tcp_port_in_use() {
+  local port="$1"
+  if have_cmd ss; then
+    [[ -n "$(ss -H -ltn "sport = :${port}" 2>/dev/null)" ]]
+  elif have_cmd netstat; then
+    netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${port}\$"
+  else
+    return 1
+  fi
+}
+
+port_owner() {
+  local port="$1"
+  if have_cmd ss; then
+    ss -H -ltnp "sport = :${port}" 2>/dev/null | head -n 1
+  fi
 }

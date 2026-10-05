@@ -1,20 +1,57 @@
 #!/usr/bin/env bash
-# Certificate, StrongSwan config, and Apple profile helpers.
+# Certificates, StrongSwan configuration, CRLs, and Apple profiles.
+# shellcheck disable=SC2034  # Globals are shared across the sourced libraries.
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   printf 'This file is meant to be sourced.\n' >&2
   exit 1
 fi
 
-CA_KEY_PATH="/etc/ipsec.d/private/vpn_client_ca.key"
-CA_CRT_PATH="/etc/ipsec.d/cacerts/vpn_client_ca.crt"
-CA_STATE_DIR="/var/lib/ikev2-vpn/ca"
-OPENSSL_CNF="/var/lib/ikev2-vpn/openssl.cnf"
-SERVER_CRT="/etc/ipsec.d/certs/server.crt"
-SERVER_KEY="/etc/ipsec.d/private/server.key"
-SERVER_CHAIN="/etc/ipsec.d/cacerts/intermediate.crt"
-CRL_PATH="/etc/ipsec.d/crls/vpn_client_ca.crl"
-MANAGED_MARK="managed-by: ikev2-vpn-installer"
+CA_DIR="${CONFIG_DIR}/ca"
+CA_KEY_PATH="${CA_DIR}/ca.key"
+CA_CRT_PATH="${CA_DIR}/ca.crt"
+CA_STATE_DIR="${STATE_DIR}/ca"
+OPENSSL_CNF="${STATE_DIR}/openssl.cnf"
+LEGACY_CA_KEY="/etc/ipsec.d/private/vpn_client_ca.key"
+LEGACY_CA_CRT="/etc/ipsec.d/cacerts/vpn_client_ca.crt"
+
+# Sets StrongSwan file locations for backend ipsec or swanctl under etc (/etc or /etc/strongswan).
+set_swan_paths() {
+  local backend="$1"
+  local etc="$2"
+  local base
+  SWAN_ETC="$etc"
+  STRONGSWAN_D="${etc}/strongswan.d"
+  case "$backend" in
+    ipsec)
+      base="${etc}/ipsec.d"
+      SWAN_CONF="${etc}/ipsec.conf"
+      SWAN_SECRETS="${etc}/ipsec.secrets"
+      CERT_DIR="${base}/certs"
+      KEY_DIR="${base}/private"
+      CACERT_DIR="${base}/cacerts"
+      CRL_DIR="${base}/crls"
+      ;;
+    swanctl)
+      base="${etc}/swanctl"
+      SWANCTL_MAIN="${base}/swanctl.conf"
+      SWAN_CONF="${base}/conf.d/ikev2-vpn.conf"
+      SWAN_SECRETS=""
+      CERT_DIR="${base}/x509"
+      KEY_DIR="${base}/private"
+      CACERT_DIR="${base}/x509ca"
+      CRL_DIR="${base}/x509crl"
+      ;;
+    *)
+      die "Unknown backend: ${backend}"
+      ;;
+  esac
+  SERVER_CRT="${CERT_DIR}/server.crt"
+  SERVER_KEY="${KEY_DIR}/server.key"
+  SERVER_CHAIN="${CACERT_DIR}/intermediate.crt"
+  CA_PUBLISHED_CRT="${CACERT_DIR}/vpn_client_ca.crt"
+  CRL_PATH="${CRL_DIR}/vpn_client_ca.crl"
+}
 
 pubkey_md5() {
   local kind="$1"
@@ -144,13 +181,25 @@ authorityKeyIdentifier = keyid:always
 EOF
 }
 
+migrate_legacy_ca() {
+  [[ -f "$CA_CRT_PATH" && -f "$CA_KEY_PATH" ]] && return 0
+  [[ -f "$LEGACY_CA_CRT" && -f "$LEGACY_CA_KEY" ]] || return 0
+  mkdir -p "$CA_DIR"
+  chmod 700 "$CA_DIR"
+  cp -p "$LEGACY_CA_CRT" "$CA_CRT_PATH"
+  install -m 600 "$LEGACY_CA_KEY" "$CA_KEY_PATH"
+  rm -f "$LEGACY_CA_KEY"
+  log "Moved the existing client CA into ${CA_DIR}."
+}
+
 create_client_ca() {
-  local subj
-  mkdir -p "$(dirname "$CA_KEY_PATH")" "$(dirname "$CA_CRT_PATH")"
+  local subj old_umask
+  migrate_legacy_ca
+  mkdir -p "$CA_DIR"
+  chmod 700 "$CA_DIR"
   if [[ ! -f "$CA_CRT_PATH" || ! -f "$CA_KEY_PATH" ]]; then
     subj="/C=${VPN_CA_COUNTRY}/O=${VPN_CA_ORG}/CN=${VPN_CA_CN}"
     log "Creating client CA: ${subj}"
-    local old_umask
     old_umask="$(umask)"
     umask 077
     openssl req -x509 -new -nodes -newkey rsa:2048 \
@@ -160,18 +209,22 @@ create_client_ca() {
       -subj "$subj" \
       -addext "basicConstraints=critical,CA:TRUE" \
       -addext "keyUsage=critical,keyCertSign,cRLSign" \
-      -addext "subjectKeyIdentifier=hash"
+      -addext "subjectKeyIdentifier=hash" 2>/dev/null
     chmod 600 "$CA_KEY_PATH"
     chmod 644 "$CA_CRT_PATH"
     umask "$old_umask"
   else
-    log "Client CA already exists. Leaving the existing key and certificate in place."
+    log "Client CA already exists. Keeping the existing key and certificate."
   fi
-  # shellcheck disable=SC1090
   eval "$(ca_subject_fields "$CA_CRT_PATH")"
   init_ca_db "$CA_STATE_DIR"
   write_openssl_cnf "$OPENSSL_CNF" "$CA_STATE_DIR" "$CA_CRT_PATH" "$CA_KEY_PATH"
-  rm -f "$(dirname "$CA_CRT_PATH")/vpn_client_ca.srl"
+}
+
+publish_client_ca() {
+  mkdir -p "$CACERT_DIR"
+  install -m 644 "$CA_CRT_PATH" "$CA_PUBLISHED_CRT"
+  rm -f "${CACERT_DIR}/vpn_client_ca.srl"
 }
 
 write_ipsec_conf() {
@@ -231,13 +284,100 @@ EOF
   umask "$old_umask"
 }
 
+write_swanctl_conf() {
+  local dest="$1"
+  local dns4 dns6 pool_v4_dns="" pool_v6_dns=""
+  dns4="$(dns_for_family "$VPN_DNS" ipv4)"
+  dns6="$(dns_for_family "$VPN_DNS" ipv6)"
+  [[ -n "$dns4" ]] && pool_v4_dns=$'\n'"        dns = ${dns4}"
+  [[ -n "$dns6" ]] && pool_v6_dns=$'\n'"        dns = ${dns6}"
+  mkdir -p "$(dirname "$dest")"
+  cat >"$dest" <<EOF
+# ${MANAGED_MARK}
+connections {
+    ikev2-cert {
+        version = 2
+        local_addrs = %any
+        proposals = aes256-sha256-modp2048,aes128-sha256-modp2048,aes256-sha1-modp2048,default
+        pools = ikev2-vpn-v4,ikev2-vpn-v6
+        fragmentation = yes
+        encap = yes
+        dpd_delay = 300s
+        send_cert = always
+        unique = never
+        local {
+            auth = pubkey
+            certs = server.crt
+            id = ${VPN_DOMAIN}
+        }
+        remote {
+            auth = pubkey
+            cacerts = vpn_client_ca.crt
+        }
+        children {
+            ikev2-cert {
+                local_ts = 0.0.0.0/0,::/0
+                esp_proposals = aes256-sha256,aes128-sha256,aes256gcm16,aes128gcm16,aes256-sha1,default
+                dpd_action = clear
+            }
+        }
+    }
+}
+
+pools {
+    ikev2-vpn-v4 {
+        addrs = ${VPN_POOL_V4}${pool_v4_dns}
+    }
+    ikev2-vpn-v6 {
+        addrs = ${VPN_POOL_V6}${pool_v6_dns}
+    }
+}
+EOF
+  chmod 644 "$dest"
+}
+
+ensure_swanctl_include() {
+  local main="$1"
+  mkdir -p "$(dirname "$main")/conf.d"
+  if [[ ! -f "$main" ]]; then
+    printf '# %s\ninclude conf.d/*.conf\n' "$MANAGED_MARK" >"$main"
+    chmod 644 "$main"
+  elif ! grep -Eq '^[[:space:]]*include[[:space:]]+conf\.d/\*\.conf' "$main"; then
+    printf '\ninclude conf.d/*.conf\n' >>"$main"
+  fi
+}
+
+backup_unmanaged() {
+  local path="$1"
+  if [[ -f "$path" ]] && ! grep -q "$MANAGED_MARK" "$path"; then
+    cp -a "$path" "${path}.bak.$(date +%Y%m%d%H%M%S)"
+    log "Backed up ${path}."
+  fi
+}
+
+write_swan_config() {
+  case "$VPN_BACKEND" in
+    ipsec)
+      backup_unmanaged "$SWAN_CONF"
+      backup_unmanaged "$SWAN_SECRETS"
+      write_ipsec_conf "$SWAN_CONF"
+      write_ipsec_secrets "$SWAN_SECRETS" "$VPN_SERVER_KEY_TYPE"
+      ;;
+    swanctl)
+      ensure_swanctl_include "$SWANCTL_MAIN"
+      write_swanctl_conf "$SWAN_CONF"
+      ;;
+  esac
+}
+
 sync_server_cert() {
-  local live="/etc/letsencrypt/live/${VPN_DOMAIN}"
+  local live="${LETSENCRYPT_DIR}/live/${VPN_DOMAIN}"
   local cert_hash key_hash
   [[ -f "${live}/cert.pem" ]] || die "Missing ${live}/cert.pem. Obtain a Let's Encrypt certificate first."
   [[ -f "${live}/privkey.pem" ]] || die "Missing ${live}/privkey.pem."
   [[ -f "${live}/chain.pem" ]] || die "Missing ${live}/chain.pem."
-  mkdir -p /etc/ipsec.d/certs /etc/ipsec.d/private /etc/ipsec.d/cacerts
+  mkdir -p "$CERT_DIR" "$KEY_DIR" "$CACERT_DIR"
+  chmod 700 "$KEY_DIR"
   cp -L "${live}/cert.pem" "$SERVER_CRT"
   cp -L "${live}/privkey.pem" "$SERVER_KEY"
   cp -L "${live}/chain.pem" "$SERVER_CHAIN"
@@ -252,44 +392,93 @@ sync_server_cert() {
   log "Server certificate matches its ${VPN_SERVER_KEY_TYPE} private key."
 }
 
-strongswan_unit() {
-  if systemctl cat strongswan-starter.service >/dev/null 2>&1; then
-    printf 'strongswan-starter\n'
-  elif systemctl cat strongswan.service >/dev/null 2>&1; then
-    printf 'strongswan\n'
-  else
-    die "Neither strongswan-starter.service nor strongswan.service is installed."
-  fi
+swanctl_load() {
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    if swanctl --load-all >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  swanctl --load-all
 }
 
 restart_strongswan() {
-  local unit
-  unit="$(strongswan_unit)"
-  systemctl enable "$unit"
-  systemctl restart "$unit"
-  systemctl is-active --quiet "$unit" || die "Service ${unit} is not active."
-  log "Restarted ${unit}."
+  local i
+  [[ "${IKEV2_SKIP_SERVICE:-0}" == "1" ]] && return 0
+  svc_enable_restart "$VPN_SERVICE"
+  for i in 1 2 3 4 5; do
+    svc_is_active "$VPN_SERVICE" && break
+    sleep 1
+  done
+  svc_is_active "$VPN_SERVICE" || die "Service ${VPN_SERVICE} is not running. Check its logs."
+  [[ "$VPN_BACKEND" == "swanctl" ]] && swanctl_load
+  log "Restarted ${VPN_SERVICE}."
 }
 
+# Prints the loaded connection and certificate listing from the running daemon.
+swan_listing() {
+  local cmd
+  case "$VPN_BACKEND" in
+    ipsec)
+      cmd="$(ipsec_command)"
+      [[ -n "$cmd" ]] || return 1
+      "$cmd" statusall 2>/dev/null
+      "$cmd" listall 2>/dev/null
+      ;;
+    swanctl)
+      swanctl --list-conns 2>/dev/null
+      swanctl --list-certs 2>/dev/null
+      ;;
+  esac
+}
+
+verify_strongswan() {
+  local listing
+  for _ in 1 2 3 4 5; do
+    listing="$(swan_listing || true)"
+    if grep -q 'ikev2-cert' <<<"$listing" && grep -q 'has private key' <<<"$listing"; then
+      log "StrongSwan loaded connection ikev2-cert and the server private key."
+      return 0
+    fi
+    sleep 1
+  done
+  grep -q 'ikev2-cert' <<<"$listing" || die "StrongSwan did not load connection ikev2-cert."
+  die "StrongSwan did not load the private key for ${VPN_DOMAIN}."
+}
+
+# The SAN carries NAME because iOS and other clients send it as their IKE identity.
 issue_client_cert() {
   local name="$1"
   local work_dir="$2"
-  local key crt csr old_umask
+  local key crt csr ext old_umask
   old_umask="$(umask)"
   key="${work_dir}/${name}.key"
   csr="${work_dir}/${name}.csr"
   crt="${work_dir}/${name}.crt"
+  ext="${work_dir}/${name}.ext"
   umask 077
   openssl req -new -newkey rsa:2048 -nodes \
     -keyout "$key" \
     -out "$csr" \
-    -subj "/C=${VPN_CA_COUNTRY}/O=${VPN_CA_ORG}/CN=${name}"
+    -subj "/C=${VPN_CA_COUNTRY}/O=${VPN_CA_ORG}/CN=${name}" 2>/dev/null
   chmod 600 "$key"
+  cat >"$ext" <<EOF
+[ client_ext ]
+basicConstraints = CA:FALSE
+keyUsage = critical, digitalSignature
+extendedKeyUsage = clientAuth
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
+subjectAltName = DNS:${name}
+EOF
   openssl ca -config "$OPENSSL_CNF" -batch -notext \
+    -extfile "$ext" -extensions client_ext \
     -in "$csr" \
     -out "$crt" \
-    -days 3650 >/dev/null
+    -days 3650 >/dev/null 2>&1 || die "Failed to sign the certificate for ${name}."
   chmod 644 "$crt"
+  rm -f "$csr" "$ext"
   umask "$old_umask"
 }
 
@@ -297,7 +486,7 @@ revoke_certificate() {
   local crt="$1"
   local output rc
   [[ -f "$crt" ]] || die "Certificate not found: ${crt}"
-  [[ -f "$OPENSSL_CNF" ]] || die "Missing ${OPENSSL_CNF}. Run install.sh first."
+  [[ -f "$OPENSSL_CNF" ]] || die "Missing ${OPENSSL_CNF}. Run 'ikev2 install' first."
   set +e
   output="$(openssl ca -config "$OPENSSL_CNF" -revoke "$crt" -crl_reason keyCompromise -batch 2>&1)"
   rc=$?
@@ -313,26 +502,32 @@ revoke_certificate() {
     log "Revoked ${crt}"
   fi
   publish_crl
+  restart_strongswan
 }
 
 publish_crl() {
-  local crl_tmp unit
-  [[ -f "$OPENSSL_CNF" ]] || die "Missing ${OPENSSL_CNF}. Run install.sh first."
-  mkdir -p "$(dirname "$CRL_PATH")"
+  local crl_tmp
+  [[ -f "$OPENSSL_CNF" ]] || die "Missing ${OPENSSL_CNF}. Run 'ikev2 install' first."
+  mkdir -p "$CRL_DIR"
   crl_tmp="$(mktemp)"
-  openssl ca -config "$OPENSSL_CNF" -gencrl -out "$crl_tmp" -batch >/dev/null
+  openssl ca -config "$OPENSSL_CNF" -gencrl -out "$crl_tmp" -batch >/dev/null 2>&1 \
+    || die "Failed to generate the CRL."
   install -m 644 "$crl_tmp" "$CRL_PATH"
   rm -f "$crl_tmp"
-  if [[ "${IKEV2_SKIP_SERVICE:-0}" != "1" ]] && command -v systemctl >/dev/null 2>&1; then
-    if systemctl cat strongswan-starter.service >/dev/null 2>&1 || systemctl cat strongswan.service >/dev/null 2>&1; then
-      unit="$(strongswan_unit)"
-      if command -v ipsec >/dev/null 2>&1; then
-        ipsec rereadcrls >/dev/null 2>&1 || true
-      fi
-      systemctl restart "$unit"
-    fi
-  fi
   log "Published CRL at ${CRL_PATH}"
+}
+
+# Prints "status name serial" for every issued client certificate.
+list_issued_clients() {
+  local index="${CA_STATE_DIR}/index.txt"
+  [[ -f "$index" ]] || return 0
+  awk -F'\t' '{
+    status = ($1 == "R") ? "revoked" : (($1 == "V") ? "valid" : "expired")
+    n = split($6, parts, "/")
+    cn = ""
+    for (i = 1; i <= n; i++) if (parts[i] ~ /^CN=/) cn = substr(parts[i], 4)
+    print status, cn, $4
+  }' "$index"
 }
 
 write_mobileconfig_xml() {
