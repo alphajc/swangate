@@ -56,7 +56,7 @@ expect_fail "bad backend" "$ROOT/swangate" install --domain vpn.example.com --ip
 expect_fail "issue without name" "$ROOT/swangate" issue
 VPN_DOMAIN=
 VPN_EMAIL=
-prompt_install_inputs <<'EOF'
+prompt_install_inputs 2>/dev/null <<'EOF'
 vpn.example.com
 admin@example.com
 EOF
@@ -64,7 +64,7 @@ expect_eq "prompt domain" "$VPN_DOMAIN" "vpn.example.com"
 expect_eq "prompt email" "$VPN_EMAIL" "admin@example.com"
 VPN_DOMAIN=vpn.example.com
 VPN_EMAIL=
-prompt_install_inputs <<'EOF'
+prompt_install_inputs 2>/dev/null <<'EOF'
 
 EOF
 expect_eq "prompt keeps domain" "$VPN_DOMAIN" "vpn.example.com"
