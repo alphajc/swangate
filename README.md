@@ -70,7 +70,7 @@ curl -fsSL https://raw.githubusercontent.com/alphajc/swangate/main/get.sh | sudo
 | `--ca-country` | `CN` | 客户端 CA 的国家代码 |
 | `--pool-v4` | `10.10.10.0/24` | 分给客户端的 IPv4 |
 | `--pool-v6` | `fd00:10:10::/64` | 分给客户端的 IPv6，不能大于 /64 |
-| `--dns` | `1.1.1.1,8.8.8.8,2606:4700:4700::1111` | 推给客户端的 DNS |
+| `--dns` | `1.1.1.1,2606:4700:4700::1111` | 推给客户端的 DNS（默认各一个 IPv4/IPv6，避免 IKE_AUTH 过大） |
 | `--clients-dir` | `/root/vpn-clients` | 客户端文件目录 |
 | `--backend` | `auto` | `ipsec`（ipsec.conf）或 `swanctl` |
 | `--firewall` | `auto` | `firewalld`、`iptables` 或 `nftables` |

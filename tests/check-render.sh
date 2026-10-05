@@ -329,6 +329,8 @@ grep -q 'dpdtimeout=120s' "${tmp}/ipsec.conf" || fail "dpd timeout"
 grep -q 'ikelifetime=24h' "${tmp}/ipsec.conf" || fail "ike lifetime"
 grep -q 'lifetime=8h' "${tmp}/ipsec.conf" || fail "child lifetime"
 grep -q 'leftcert=server.crt' "${tmp}/ipsec.conf" || fail "missing leaf cert"
+grep -q 'fragmentation=accept' "${tmp}/ipsec.conf" || fail "ipsec must not send IKE fragments"
+grep -q 'mobike=no' "${tmp}/ipsec.conf" || fail "ipsec mobike disabled"
 if grep -Eq '(^|[^a-z])timeout=|eap-mschapv2' "${tmp}/ipsec.conf"; then fail "removed setting in ipsec.conf"; fi
 if grep -q 'RSA' "${tmp}/ipsec.secrets"; then fail "ECDSA secrets include RSA"; fi
 
@@ -336,6 +338,8 @@ write_swanctl_conf "${tmp}/swanctl.conf"
 sw="$(cat "${tmp}/swanctl.conf")"
 grep -q 'auth = pubkey' <<<"$sw" || fail "swanctl pubkey"
 grep -q 'cacerts = vpn_client_ca.crt' <<<"$sw" || fail "swanctl cacerts"
+grep -q 'fragmentation = accept' <<<"$sw" || fail "swanctl must not send IKE fragments"
+grep -q 'mobike = no' <<<"$sw" || fail "swanctl mobike disabled"
 grep -q 'local_ts = 0.0.0.0/0,::/0' <<<"$sw" || fail "swanctl full tunnel"
 grep -q 'esp_proposals = aes256-sha256-modp2048,aes128-sha256-modp2048,aes256gcm16-modp2048,aes128gcm16-modp2048,aes256-sha256,aes128-sha256,aes256gcm16,aes128gcm16,aes256-sha1' <<<"$sw" \
   || fail "swanctl esp"
@@ -527,11 +531,14 @@ for needle in (
     "<key>UseConfigurationAttributeInternalIPSubnet</key>",
     "<key>Proxies</key>",
     "<key>OnDemandEnabled</key>",
+    "<key>DisableMOBIKE</key>",
     "<key>DisableRedirect</key>",
     "<true/>",
 ):
     if needle not in text:
         raise SystemExit("missing %r" % needle)
+if "<key>DisableMOBIKE</key>\n                <false/>" in text:
+    raise SystemExit("DisableMOBIKE must be true when server disables MOBIKE")
 if "<key>IKESAParameters</key>" in text or "<key>ChildSAParameters</key>" in text:
     raise SystemExit("legacy SA parameter key names must not be used")
 PY

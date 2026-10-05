@@ -294,8 +294,12 @@ conn ikev2-cert
     auto=add
     type=tunnel
     compress=no
-    fragmentation=yes
+    # accept: announce/receive IKE fragments but do not send them. Sending
+    # EF(1/2)+EF(2/2) often fails on mobile IPv6 paths (client retransmits
+    # IKE_AUTH, then DPD times out) even when the leaf cert alone is used.
+    fragmentation=accept
     forceencaps=yes
+    mobike=no
     ike=aes256-sha256-modp2048,aes128-sha256-modp2048,aes256-sha1-modp2048
     esp=aes256-sha256-modp2048,aes128-sha256-modp2048,aes256gcm16-modp2048,aes128gcm16-modp2048,aes256-sha256,aes128-sha256,aes256gcm16,aes128gcm16,aes256-sha1
     left=%any
@@ -349,8 +353,11 @@ connections {
         local_addrs = %any
         proposals = aes256-sha256-modp2048,aes128-sha256-modp2048,aes256-sha1-modp2048
         pools = ikev2-vpn-v4,ikev2-vpn-v6
-        fragmentation = yes
+        # accept: announce/receive IKE fragments but do not send them. Sending
+        # EF fragments often fails on mobile IPv6 paths even with a single leaf cert.
+        fragmentation = accept
         encap = yes
+        mobike = no
         dpd_delay = 30s
         dpd_timeout = 120s
         rekey_time = 24h
@@ -638,7 +645,7 @@ write_mobileconfig_xml() {
                 <key>DeadPeerDetectionRate</key>
                 <string>Medium</string>
                 <key>DisableMOBIKE</key>
-                <false/>
+                <true/>
                 <key>DisableRedirect</key>
                 <true/>
                 <key>EnableCertificateRevocationCheck</key>
