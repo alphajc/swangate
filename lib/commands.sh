@@ -625,11 +625,13 @@ cmd_issue() {
 
   local p12_b64 cert_type issuer_cn server_cn
   p12_b64="$(base64 "$p12" | tr -d '\r\n')"
-  # CertificateType is the client cert in PayloadCertificateUUID (RSA here).
-  cert_type="$(apple_certificate_type "$crt")"
+  # CertificateType must match the server AUTH algorithm (LE ECDSA -> ECDSA256),
+  # not the RSA client certificate in PayloadCertificateUUID.
+  cert_type=RSA
   issuer_cn=""
   server_cn="$VPN_DOMAIN"
   if [[ -f "$SERVER_CRT" ]]; then
+    cert_type="$(apple_certificate_type "$SERVER_CRT")"
     issuer_cn="$(cert_common_name "$SERVER_CRT" issuer)"
     server_cn="$(cert_common_name "$SERVER_CRT" subject)"
   fi
