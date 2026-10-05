@@ -2,15 +2,27 @@
 
 一条命令在 Linux 服务器上装好 **IPv6 IKEv2 VPN**（StrongSwan）。服务器用 Let's Encrypt 证书表明身份，客户端用本机私有 CA 签发的证书登录，不用账号密码。连上后客户端同时拿到 IPv4 和 IPv6 内网地址，全部流量走 VPN。
 
-## 一键安装
+## 安装
 
-在服务器上以 root 执行：
+两步即可，命令可原样复制粘贴：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alphajc/swangate/main/get.sh | sudo bash -s -- install --domain vpn.example.com --email admin@example.com
+# 1) 安装 swangate 工具
+curl -fsSL https://raw.githubusercontent.com/alphajc/swangate/main/get.sh | sudo bash
+
+# 2) 配置 VPN（终端会提示输入域名；邮箱可回车跳过）
+sudo swangate install
 ```
 
-把域名和邮箱换成你自己的。这条命令会下载 `swangate`，装到 `/usr/local/bin/swangate`，再执行安装。之后直接用 `swangate` 管理。
+第一步只下载并安装 `/usr/local/bin/swangate`。第二步在交互终端询问域名和可选邮箱，再安装 StrongSwan 与证书。之后直接用 `swangate` 管理。
+
+非交互（脚本 / CI）仍可带参数，或把工具安装与 VPN 配置合成一行：
+
+```bash
+sudo swangate install --domain vpn.example.com --email admin@example.com
+# 或
+curl -fsSL https://raw.githubusercontent.com/alphajc/swangate/main/get.sh | sudo bash -s -- install --domain vpn.example.com --email admin@example.com
+```
 
 安装前确认：
 
@@ -21,7 +33,7 @@ curl -fsSL https://raw.githubusercontent.com/alphajc/swangate/main/get.sh | sudo
 ## 命令
 
 ```bash
-sudo swangate install --domain vpn.example.com --email admin@example.com
+sudo swangate install
 sudo swangate issue alice
 sudo swangate revoke alice
 sudo swangate status
@@ -131,7 +143,7 @@ sudo swangate revoke alice
 ```bash
 git clone https://github.com/alphajc/swangate.git
 cd swangate
-sudo ./swangate install --domain vpn.example.com
+sudo ./swangate install
 ```
 
 离线测试：`bash tests/check-render.sh`。
@@ -141,4 +153,4 @@ sudo ./swangate install --domain vpn.example.com
 - 仓库里没有任何真实域名、地址、私钥或口令。客户端 CA 在安装时生成，存放在 `/etc/ikev2-vpn/ca/`，权限 `700`；每个 `.p12` 的口令单独随机生成。
 - `.p12` 和 `.mobileconfig` 含客户端私钥，请用 `scp` 或隔空投送传输，不要放到公网 HTTP 上。
 - 客户端证书可以转发全部 IPv4 / IPv6 流量。设备丢失时立刻 `swangate revoke`。
-- 一键安装会以 root 运行从 GitHub 下载的脚本。介意的话先下载 `get.sh` 看过再执行，或者用上面的“从源码运行”。
+- 安装工具时会以 root 运行从 GitHub 下载的脚本。介意的话先下载 `get.sh` 看过再执行，或者用上面的“从源码运行”。

@@ -62,7 +62,7 @@ say "Installed ${IKEV2_BIN}"
 if [[ $# -eq 0 ]]; then
   cat <<'EOF'
 Next step:
-  sudo swangate install --domain vpn.example.com --email admin@example.com
+  sudo swangate install
 EOF
   exit 0
 fi
