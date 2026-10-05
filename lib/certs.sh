@@ -486,7 +486,7 @@ revoke_certificate() {
   local crt="$1"
   local output rc
   [[ -f "$crt" ]] || die "Certificate not found: ${crt}"
-  [[ -f "$OPENSSL_CNF" ]] || die "Missing ${OPENSSL_CNF}. Run 'ikev2 install' first."
+  [[ -f "$OPENSSL_CNF" ]] || die "Missing ${OPENSSL_CNF}. Run 'swangate install' first."
   set +e
   output="$(openssl ca -config "$OPENSSL_CNF" -revoke "$crt" -crl_reason keyCompromise -batch 2>&1)"
   rc=$?
@@ -507,7 +507,7 @@ revoke_certificate() {
 
 publish_crl() {
   local crl_tmp
-  [[ -f "$OPENSSL_CNF" ]] || die "Missing ${OPENSSL_CNF}. Run 'ikev2 install' first."
+  [[ -f "$OPENSSL_CNF" ]] || die "Missing ${OPENSSL_CNF}. Run 'swangate install' first."
   mkdir -p "$CRL_DIR"
   crl_tmp="$(mktemp)"
   openssl ca -config "$OPENSSL_CNF" -gencrl -out "$crl_tmp" -batch >/dev/null 2>&1 \

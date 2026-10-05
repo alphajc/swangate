@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ikev2: install and manage an IPv6 IKEv2 VPN (StrongSwan, certificate authentication).
+# swangate: install and manage an IPv6 IKEv2 VPN (StrongSwan, certificate authentication).
 set -euo pipefail
 
 IKEV2_SELF="$(readlink -f "${BASH_SOURCE[0]}")"
@@ -16,4 +16,4 @@ source "${IKEV2_HOME}/lib/certs.sh"
 # shellcheck source=lib/commands.sh
 source "${IKEV2_HOME}/lib/commands.sh"
 
-ikev2_main "$@"
+swangate_main "$@"

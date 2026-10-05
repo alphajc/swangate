@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Subcommands for the ikev2 command.
+# Subcommands for the swangate command.
 # shellcheck disable=SC2034  # Globals are shared across the sourced libraries.
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
@@ -7,13 +7,13 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   exit 1
 fi
 
-IKEV2_PREFIX="${IKEV2_PREFIX:-/usr/local/lib/ikev2}"
-IKEV2_BIN="${IKEV2_BIN:-/usr/local/bin/ikev2}"
+IKEV2_PREFIX="${IKEV2_PREFIX:-/usr/local/lib/swangate}"
+IKEV2_BIN="${IKEV2_BIN:-/usr/local/bin/swangate}"
 RENEW_HOOK="${LETSENCRYPT_DIR}/renewal-hooks/deploy/ikev2-vpn"
 
 usage_main() {
   cat <<'EOF'
-Usage: ikev2 <command> [options]
+Usage: swangate <command> [options]
 
 Commands:
   install   Install or update the IPv6 IKEv2 VPN server
@@ -22,13 +22,13 @@ Commands:
   status    Show server, firewall, and client status
   help      Show this help
 
-Run 'ikev2 <command> --help' for the options of a command.
+Run 'swangate <command> --help' for the options of a command.
 EOF
 }
 
 usage_install() {
   cat <<'EOF'
-Usage: ikev2 install --domain NAME --ipv6 ADDRESS [options]
+Usage: swangate install --domain NAME --ipv6 ADDRESS [options]
 
 Install StrongSwan IKEv2 with a Let's Encrypt server certificate and a local
 CA for client certificates. Safe to run again.
@@ -62,7 +62,7 @@ EOF
 
 usage_issue() {
   cat <<'EOF'
-Usage: ikev2 issue [--force] NAME
+Usage: swangate issue [--force] NAME
 
 Issue a client certificate signed by the local VPN CA and write:
   NAME.crt NAME.key NAME.p12 NAME.mobileconfig ca.crt connection.txt
@@ -77,7 +77,7 @@ EOF
 
 usage_revoke() {
   cat <<'EOF'
-Usage: ikev2 revoke NAME
+Usage: swangate revoke NAME
 
 Revoke the client certificate for NAME, publish a CRL, and restart
 StrongSwan so the certificate is rejected immediately.
@@ -86,7 +86,7 @@ EOF
 
 usage_status() {
   cat <<'EOF'
-Usage: ikev2 status
+Usage: swangate status
 
 Show the StrongSwan service, loaded connection, server certificate,
 dataplane, firewall, and issued client certificates.
@@ -122,11 +122,11 @@ self_install() {
   dest="$(cd "$IKEV2_PREFIX" && pwd -P)"
   if [[ "$src" != "$dest" ]]; then
     install -d -m 755 "${IKEV2_PREFIX}/lib"
-    install -m 755 "${IKEV2_HOME}/ikev2" "${IKEV2_PREFIX}/ikev2"
+    install -m 755 "${IKEV2_HOME}/swangate" "${IKEV2_PREFIX}/swangate"
     install -m 644 "${IKEV2_HOME}"/lib/*.sh "${IKEV2_PREFIX}/lib/"
   fi
   install -d -m 755 "$(dirname "$IKEV2_BIN")"
-  ln -sfn "${IKEV2_PREFIX}/ikev2" "$IKEV2_BIN"
+  ln -sfn "${IKEV2_PREFIX}/swangate" "$IKEV2_BIN"
   if [[ -f /usr/local/lib/ikev2-vpn/certs.sh ]]; then
     rm -rf /usr/local/lib/ikev2-vpn
   fi
@@ -246,7 +246,7 @@ cmd_install() {
         take_value "$opt" "$inline" "${2-}" "$has_next"
         ;;
       *)
-        die "Unknown option for install: $1. Run 'ikev2 install --help'."
+        die "Unknown option for install: $1. Run 'swangate install --help'."
         ;;
     esac
     case "$opt" in
@@ -267,8 +267,8 @@ cmd_install() {
     shift "$OPT_SHIFT"
   done
 
-  [[ -n "$VPN_DOMAIN" ]] || die "Missing --domain. Run 'ikev2 install --help'."
-  [[ -n "$VPN_IPV6" ]] || die "Missing --ipv6. Run 'ikev2 install --help'."
+  [[ -n "$VPN_DOMAIN" ]] || die "Missing --domain. Run 'swangate install --help'."
+  [[ -n "$VPN_IPV6" ]] || die "Missing --ipv6. Run 'swangate install --help'."
   case "$backend_arg" in auto|ipsec|swanctl) ;; *) die "Unknown --backend: ${backend_arg}" ;; esac
   case "$firewall_arg" in auto|firewalld|iptables|nftables) ;; *) die "Unknown --firewall: ${firewall_arg}" ;; esac
   case "$dataplane_arg" in auto|kernel|libipsec) ;; *) die "Unknown --dataplane: ${dataplane_arg}" ;; esac
@@ -382,7 +382,7 @@ IKEv2 VPN is installed.
   Client files:    ${VPN_CLIENTS_DIR}
 
 Issue a client certificate with:
-  sudo ikev2 issue <name>
+  sudo swangate issue <name>
 EOF
 }
 
@@ -400,14 +400,14 @@ cmd_issue() {
     esac
     shift
   done
-  [[ -n "$name" ]] || die "Missing client name. Usage: sudo ikev2 issue <name>"
+  [[ -n "$name" ]] || die "Missing client name. Usage: sudo swangate issue <name>"
 
   require_root
   require_cmd openssl python3
   validate_client_name "$name"
   load_runtime
-  [[ -f "$CA_CRT_PATH" && -f "$CA_KEY_PATH" ]] || die "Client CA is missing. Run 'ikev2 install' first."
-  [[ -f "$OPENSSL_CNF" ]] || die "Missing ${OPENSSL_CNF}. Run 'ikev2 install' first."
+  [[ -f "$CA_CRT_PATH" && -f "$CA_KEY_PATH" ]] || die "Client CA is missing. Run 'swangate install' first."
+  [[ -f "$OPENSSL_CNF" ]] || die "Missing ${OPENSSL_CNF}. Run 'swangate install' first."
 
   local work_dir="${VPN_CLIENTS_DIR}/${name}"
   local key="${work_dir}/${name}.key"
@@ -519,7 +519,7 @@ cmd_revoke() {
     esac
     shift
   done
-  [[ -n "$name" ]] || die "Missing client name. Usage: sudo ikev2 revoke <name>"
+  [[ -n "$name" ]] || die "Missing client name. Usage: sudo swangate revoke <name>"
 
   require_root
   require_cmd openssl
@@ -614,7 +614,7 @@ cmd_renew_hook() {
   restart_strongswan
 }
 
-ikev2_main() {
+swangate_main() {
   local cmd="${1:-}"
   [[ $# -gt 0 ]] && shift
   case "$cmd" in
@@ -630,7 +630,7 @@ ikev2_main() {
       return 1
       ;;
     *)
-      printf '[ikev2] ERROR: Unknown command: %s\n\n' "$cmd" >&2
+      printf '[swangate] ERROR: Unknown command: %s\n\n' "$cmd" >&2
       usage_main >&2
       return 1
       ;;

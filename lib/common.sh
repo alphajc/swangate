@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared helpers for the ikev2 command.
+# Shared helpers for the swangate command.
 # shellcheck disable=SC2034  # Globals are shared across the sourced libraries.
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
@@ -13,15 +13,15 @@ LETSENCRYPT_DIR="${IKEV2_LETSENCRYPT_DIR:-/etc/letsencrypt}"
 MANAGED_MARK="managed-by: ikev2-vpn-installer"
 
 log() {
-  printf '[ikev2] %s\n' "$*"
+  printf '[swangate] %s\n' "$*"
 }
 
 warn() {
-  printf '[ikev2] WARNING: %s\n' "$*" >&2
+  printf '[swangate] WARNING: %s\n' "$*" >&2
 }
 
 die() {
-  printf '[ikev2] ERROR: %s\n' "$*" >&2
+  printf '[swangate] ERROR: %s\n' "$*" >&2
   exit 1
 }
 
@@ -156,7 +156,7 @@ save_config() {
 load_config() {
   local dest
   dest="$(config_file)"
-  [[ -f "$dest" ]] || die "Missing ${dest}. Run 'ikev2 install' first."
+  [[ -f "$dest" ]] || die "Missing ${dest}. Run 'swangate install' first."
   # shellcheck disable=SC1090
   source "$dest"
   [[ -n "${VPN_DOMAIN:-}" ]] || die "VPN_DOMAIN is missing from ${dest}"

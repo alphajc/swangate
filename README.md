@@ -1,4 +1,4 @@
-# ikev2
+# SwanGate
 
 一条命令在 Linux 服务器上装好 **IPv6 IKEv2 VPN**（StrongSwan）。服务器用 Let's Encrypt 证书表明身份，客户端用本机私有 CA 签发的证书登录，不用账号密码。连上后客户端同时拿到 IPv4 和 IPv6 内网地址，全部流量走 VPN。
 
@@ -7,10 +7,10 @@
 在服务器上以 root 执行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alphajc/ikev2/main/get.sh | sudo bash -s -- install --domain vpn.example.com --ipv6 2001:db8::1 --email admin@example.com
+curl -fsSL https://raw.githubusercontent.com/alphajc/swangate/main/get.sh | sudo bash -s -- install --domain vpn.example.com --ipv6 2001:db8::1 --email admin@example.com
 ```
 
-把域名、IPv6 和邮箱换成你自己的。这条命令会下载 `ikev2`，装到 `/usr/local/bin/ikev2`，再执行安装。之后直接用 `ikev2` 管理。
+把域名、IPv6 和邮箱换成你自己的。这条命令会下载 `swangate`，装到 `/usr/local/bin/swangate`，再执行安装。之后直接用 `swangate` 管理。
 
 安装前确认：
 
@@ -21,10 +21,10 @@ curl -fsSL https://raw.githubusercontent.com/alphajc/ikev2/main/get.sh | sudo ba
 ## 命令
 
 ```bash
-sudo ikev2 install --domain vpn.example.com --ipv6 2001:db8::1 --email admin@example.com
-sudo ikev2 issue alice
-sudo ikev2 revoke alice
-sudo ikev2 status
+sudo swangate install --domain vpn.example.com --ipv6 2001:db8::1 --email admin@example.com
+sudo swangate issue alice
+sudo swangate revoke alice
+sudo swangate status
 ```
 
 | 子命令 | 作用 |
@@ -34,7 +34,7 @@ sudo ikev2 status
 | `revoke <名字>` | 吊销证书、发布 CRL 并重启 StrongSwan，立刻拒绝该证书 |
 | `status` | 查看服务、连接、证书到期时间、数据通道、防火墙和所有客户端 |
 
-`ikev2 <子命令> --help` 列出全部参数。`install` 常用的可选参数：
+`swangate <子命令> --help` 列出全部参数。`install` 常用的可选参数：
 
 | 参数 | 默认值 | 含义 |
 | --- | --- | --- |
@@ -75,7 +75,7 @@ NixOS、Gentoo、Void 以及其他系统不支持，安装程序会在改动任�
 
 ## 客户端
 
-`sudo ikev2 issue alice` 把文件写到 `/root/vpn-clients/alice/`：
+`sudo swangate issue alice` 把文件写到 `/root/vpn-clients/alice/`：
 
 - `alice.mobileconfig`：iOS / macOS 描述文件，已用服务器证书签名，包含客户端证书
 - `alice.p12`：Windows、Android 用；随机口令打印在终端，也写在 `connection.txt`
@@ -90,7 +90,7 @@ NixOS、Gentoo、Void 以及其他系统不支持，安装程序会在改动任�
 ## 吊销
 
 ```bash
-sudo ikev2 revoke alice
+sudo swangate revoke alice
 ```
 
 证书写入 CRL，StrongSwan 重启后立即拒绝它。iOS 描述文件不检查吊销状态，由服务端负责拒绝。
@@ -98,9 +98,9 @@ sudo ikev2 revoke alice
 ## 从源码运行
 
 ```bash
-git clone https://github.com/alphajc/ikev2.git
-cd ikev2
-sudo ./ikev2 install --domain vpn.example.com --ipv6 2001:db8::1
+git clone https://github.com/alphajc/swangate.git
+cd swangate
+sudo ./swangate install --domain vpn.example.com --ipv6 2001:db8::1
 ```
 
 离线测试：`bash tests/check-render.sh`。
@@ -109,5 +109,5 @@ sudo ./ikev2 install --domain vpn.example.com --ipv6 2001:db8::1
 
 - 仓库里没有任何真实域名、地址、私钥或口令。客户端 CA 在安装时生成，存放在 `/etc/ikev2-vpn/ca/`，权限 `700`；每个 `.p12` 的口令单独随机生成。
 - `.p12` 和 `.mobileconfig` 含客户端私钥，请用 `scp` 或隔空投送传输，不要放到公网 HTTP 上。
-- 客户端证书可以转发全部 IPv4 / IPv6 流量。设备丢失时立刻 `ikev2 revoke`。
+- 客户端证书可以转发全部 IPv4 / IPv6 流量。设备丢失时立刻 `swangate revoke`。
 - 一键安装会以 root 运行从 GitHub 下载的脚本。介意的话先下载 `get.sh` 看过再执行，或者用上面的“从源码运行”。

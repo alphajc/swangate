@@ -45,15 +45,15 @@ expect_eq() {
 }
 
 # Command dispatch.
-if "$ROOT/ikev2" >/dev/null 2>&1; then fail "ikev2 without a command should fail"; fi
-"$ROOT/ikev2" help | grep -q 'install' || fail "help lists install"
-if "$ROOT/ikev2" bogus >/dev/null 2>&1; then fail "unknown command should fail"; fi
+if "$ROOT/swangate" >/dev/null 2>&1; then fail "swangate without a command should fail"; fi
+"$ROOT/swangate" help | grep -q 'install' || fail "help lists install"
+if "$ROOT/swangate" bogus >/dev/null 2>&1; then fail "unknown command should fail"; fi
 for sub in install issue revoke status; do
-  "$ROOT/ikev2" "$sub" --help | grep -q "Usage: ikev2 ${sub}" || fail "${sub} --help"
+  "$ROOT/swangate" "$sub" --help | grep -q "Usage: swangate ${sub}" || fail "${sub} --help"
 done
-expect_fail "install without ipv6" "$ROOT/ikev2" install --domain vpn.example.com
-expect_fail "bad backend" "$ROOT/ikev2" install --domain vpn.example.com --ipv6 2001:db8::1 --backend nope
-expect_fail "issue without name" "$ROOT/ikev2" issue
+expect_fail "install without ipv6" "$ROOT/swangate" install --domain vpn.example.com
+expect_fail "bad backend" "$ROOT/swangate" install --domain vpn.example.com --ipv6 2001:db8::1 --backend nope
+expect_fail "issue without name" "$ROOT/swangate" issue
 ok
 
 # Validators.
@@ -343,19 +343,19 @@ if "<integer>0</integer>" in text:
 PY
 
 # get.sh installs from a tarball and runs the subcommand.
-mkdir -p "${tmp}/tarsrc/ikev2-main"
-cp -R "$ROOT/ikev2" "$ROOT/lib" "$ROOT/get.sh" "${tmp}/tarsrc/ikev2-main/"
-tar -czf "${tmp}/ikev2.tar.gz" -C "${tmp}/tarsrc" ikev2-main
-IKEV2_TARBALL_URL="file://${tmp}/ikev2.tar.gz" IKEV2_PREFIX="${tmp}/prefix/ikev2" IKEV2_BIN="${tmp}/bin/ikev2" \
+mkdir -p "${tmp}/tarsrc/swangate-main"
+cp -R "$ROOT/swangate" "$ROOT/lib" "$ROOT/get.sh" "${tmp}/tarsrc/swangate-main/"
+tar -czf "${tmp}/swangate.tar.gz" -C "${tmp}/tarsrc" swangate-main
+IKEV2_TARBALL_URL="file://${tmp}/swangate.tar.gz" IKEV2_PREFIX="${tmp}/prefix/swangate" IKEV2_BIN="${tmp}/bin/swangate" \
   bash "$ROOT/get.sh" help >"${tmp}/get.out"
-grep -q 'Usage: ikev2' "${tmp}/get.out" || fail "get.sh runs the subcommand"
-[[ -x "${tmp}/bin/ikev2" && -f "${tmp}/prefix/ikev2/lib/commands.sh" ]] || fail "get.sh install layout"
-"${tmp}/bin/ikev2" status --help >/dev/null || fail "installed command runs through the symlink"
-IKEV2_TARBALL_URL="file://${tmp}/ikev2.tar.gz" IKEV2_PREFIX="${tmp}/prefix/ikev2" IKEV2_BIN="${tmp}/bin/ikev2" \
+grep -q 'Usage: swangate' "${tmp}/get.out" || fail "get.sh runs the subcommand"
+[[ -x "${tmp}/bin/swangate" && -f "${tmp}/prefix/swangate/lib/commands.sh" ]] || fail "get.sh install layout"
+"${tmp}/bin/swangate" status --help >/dev/null || fail "installed command runs through the symlink"
+IKEV2_TARBALL_URL="file://${tmp}/swangate.tar.gz" IKEV2_PREFIX="${tmp}/prefix/swangate" IKEV2_BIN="${tmp}/bin/swangate" \
   bash "$ROOT/get.sh" >"${tmp}/get2.out"
-grep -q 'sudo ikev2 install' "${tmp}/get2.out" || fail "get.sh without arguments prints the next step"
+grep -q 'sudo swangate install' "${tmp}/get2.out" || fail "get.sh without arguments prints the next step"
 printf 'not a tarball' >"${tmp}/bad.tar.gz"
-if IKEV2_TARBALL_URL="file://${tmp}/bad.tar.gz" IKEV2_PREFIX="${tmp}/prefix2/ikev2" IKEV2_BIN="${tmp}/bin2/ikev2" \
+if IKEV2_TARBALL_URL="file://${tmp}/bad.tar.gz" IKEV2_PREFIX="${tmp}/prefix2/swangate" IKEV2_BIN="${tmp}/bin2/swangate" \
   bash "$ROOT/get.sh" help >/dev/null 2>&1; then
   fail "get.sh must reject a broken archive"
 fi
