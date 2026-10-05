@@ -143,7 +143,7 @@ sudo swangate revoke alice
 ```bash
 git clone https://github.com/alphajc/swangate.git
 cd swangate
-sudo ./swangate install --domain vpn.example.com
+sudo ./swangate install
 ```
 
 离线测试：`bash tests/check-render.sh`。
@@ -153,4 +153,4 @@ sudo ./swangate install --domain vpn.example.com
 - 仓库里没有任何真实域名、地址、私钥或口令。客户端 CA 在安装时生成，存放在 `/etc/ikev2-vpn/ca/`，权限 `700`；每个 `.p12` 的口令单独随机生成。
 - `.p12` 和 `.mobileconfig` 含客户端私钥，请用 `scp` 或隔空投送传输，不要放到公网 HTTP 上。
 - 客户端证书可以转发全部 IPv4 / IPv6 流量。设备丢失时立刻 `swangate revoke`。
-- 一键安装会以 root 运行从 GitHub 下载的脚本。介意的话先下载 `get.sh` 看过再执行，或者用上面的“从源码运行”。
+- 安装工具时会以 root 运行从 GitHub 下载的脚本。介意的话先下载 `get.sh` 看过再执行，或者用上面的“从源码运行”。
