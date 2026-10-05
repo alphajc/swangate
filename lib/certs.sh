@@ -514,20 +514,33 @@ verify_strongswan() {
 }
 
 # The SAN carries NAME because iOS and other clients send it as their IKE identity.
+# When the server leaf is ECDSA, issue an ECDSA client key too: Apple's single
+# CertificateType field must match both client signing and server AUTH.
 issue_client_cert() {
   local name="$1"
   local work_dir="$2"
-  local key crt csr ext old_umask
+  local key crt csr ext old_umask server_type
   old_umask="$(umask)"
   key="${work_dir}/${name}.key"
   csr="${work_dir}/${name}.csr"
   crt="${work_dir}/${name}.crt"
   ext="${work_dir}/${name}.ext"
   umask 077
-  openssl req -new -newkey rsa:2048 -nodes \
-    -keyout "$key" \
-    -out "$csr" \
-    -subj "/C=${VPN_CA_COUNTRY}/O=${VPN_CA_ORG}/CN=${name}" 2>/dev/null
+  server_type=RSA
+  if [[ -f "$SERVER_CRT" ]]; then
+    server_type="$(apple_certificate_type "$SERVER_CRT")"
+  fi
+  if [[ "$server_type" == ECDSA* ]]; then
+    openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+      -keyout "$key" \
+      -out "$csr" \
+      -subj "/C=${VPN_CA_COUNTRY}/O=${VPN_CA_ORG}/CN=${name}" 2>/dev/null
+  else
+    openssl req -new -newkey rsa:2048 -nodes \
+      -keyout "$key" \
+      -out "$csr" \
+      -subj "/C=${VPN_CA_COUNTRY}/O=${VPN_CA_ORG}/CN=${name}" 2>/dev/null
+  fi
   chmod 600 "$key"
   cat >"$ext" <<EOF
 [ client_ext ]
@@ -599,9 +612,11 @@ list_issued_clients() {
 # Apple .mobileconfig layout follows hwdsl2/setup-ipsec-vpn extras/ikev2setup.sh
 # (create_mobileconfig) and Apple's VPN.IKEv2 schema, with SwanGate-specific
 # choices: AES-CBC+SHA2-256+DH14 (iOS/kernel), EnablePFS, dual-stack OverridePrimary,
-# and Let's Encrypt ServerCertificate* fields. CertificateType must match the
-# server leaf (ECDSA256 for default certbot ECDSA); Apple also requires
-# ServerCertificateIssuerCommonName when CertificateType is set.
+# and Let's Encrypt ServerCertificate* fields. CertificateType must match both
+# the server AUTH algorithm and the client signing key (ECDSA256 + ECDSA client
+# certs when using default certbot ECDSA). Apple also requires
+# ServerCertificateIssuerCommonName when CertificateType is set; embed that
+# issuer as pkcs1 so iOS can resolve CN lookups such as YE2/E7.
 write_mobileconfig_xml() {
   local dest="$1"
   local name="$2"
@@ -614,7 +629,9 @@ write_mobileconfig_xml() {
   local cert_type="${9:-RSA}"
   local issuer_cn="${10:-}"
   local server_cn="${11:-$domain}"
-  local cert_type_xml="" issuer_xml="" server_cn_xml=""
+  local issuer_b64="${12:-}"
+  local issuer_uuid="${13:-}"
+  local cert_type_xml="" issuer_xml="" server_cn_xml="" issuer_payload=""
   # Apple requires ServerCertificateIssuerCommonName when CertificateType is set.
   if [[ -n "$issuer_cn" ]]; then
     cert_type_xml=$'\n'"                <key>CertificateType</key>"$'\n'"                <string>${cert_type}</string>"
@@ -622,6 +639,29 @@ write_mobileconfig_xml() {
   fi
   if [[ -n "$server_cn" ]]; then
     server_cn_xml=$'\n'"                <key>ServerCertificateCommonName</key>"$'\n'"                <string>${server_cn}</string>"
+  fi
+  if [[ -n "$issuer_b64" && -n "$issuer_uuid" ]]; then
+    issuer_payload=$(cat <<ISSUER
+        <dict>
+            <key>PayloadCertificateFileName</key>
+            <string>server-issuer.crt</string>
+            <key>PayloadContent</key>
+            <data>${issuer_b64}</data>
+            <key>PayloadDescription</key>
+            <string>Server certificate issuer</string>
+            <key>PayloadDisplayName</key>
+            <string>${issuer_cn:-Server issuer}</string>
+            <key>PayloadIdentifier</key>
+            <string>com.ikev2vpn.issuer.${issuer_uuid}</string>
+            <key>PayloadType</key>
+            <string>com.apple.security.pkcs1</string>
+            <key>PayloadUUID</key>
+            <string>${issuer_uuid}</string>
+            <key>PayloadVersion</key>
+            <integer>1</integer>
+        </dict>
+ISSUER
+)
   fi
   cat >"$dest" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -757,7 +797,7 @@ write_mobileconfig_xml() {
             <key>PayloadVersion</key>
             <integer>1</integer>
         </dict>
-    </array>
+${issuer_payload}    </array>
     <key>PayloadDisplayName</key>
     <string>IKEv2 VPN (${name})</string>
     <key>PayloadIdentifier</key>

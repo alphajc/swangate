@@ -623,20 +623,28 @@ cmd_issue() {
   chmod 600 "$p12" "$key"
   install -m 644 "$CA_CRT_PATH" "$ca_copy"
 
-  local p12_b64 cert_type issuer_cn server_cn
+  local p12_b64 cert_type issuer_cn server_cn issuer_b64 issuer_uuid chain_src
   p12_b64="$(base64 "$p12" | tr -d '\r\n')"
-  # CertificateType must match the server AUTH algorithm (LE ECDSA -> ECDSA256),
-  # not the RSA client certificate in PayloadCertificateUUID.
+  # CertificateType must match server AUTH and the client signing key type.
   cert_type=RSA
   issuer_cn=""
   server_cn="$VPN_DOMAIN"
+  issuer_b64=""
+  issuer_uuid=""
   if [[ -f "$SERVER_CRT" ]]; then
     cert_type="$(apple_certificate_type "$SERVER_CRT")"
     issuer_cn="$(cert_common_name "$SERVER_CRT" issuer)"
     server_cn="$(cert_common_name "$SERVER_CRT" subject)"
   fi
+  chain_src="${LETSENCRYPT_DIR}/live/${VPN_DOMAIN}/chain.pem"
+  [[ -f "$chain_src" ]] || chain_src="$SERVER_CHAIN"
+  if [[ -n "$issuer_cn" && -f "$chain_src" ]]; then
+    issuer_b64="$(openssl x509 -in "$chain_src" -outform der | base64 | tr -d '\r\n')"
+    issuer_uuid="$(new_uuid)"
+  fi
   write_mobileconfig_xml "$raw" "$name" "$VPN_DOMAIN" "$p12_pass" "$p12_b64" \
-    "$(new_uuid)" "$(new_uuid)" "$(new_uuid)" "$cert_type" "$issuer_cn" "$server_cn"
+    "$(new_uuid)" "$(new_uuid)" "$(new_uuid)" "$cert_type" "$issuer_cn" "$server_cn" \
+    "$issuer_b64" "$issuer_uuid"
 
   local signer="${LETSENCRYPT_DIR}/live/${VPN_DOMAIN}/cert.pem"
   local inkey="${LETSENCRYPT_DIR}/live/${VPN_DOMAIN}/privkey.pem"
