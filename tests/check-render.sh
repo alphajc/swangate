@@ -51,7 +51,7 @@ if "$ROOT/swangate" bogus >/dev/null 2>&1; then fail "unknown command should fai
 for sub in install issue revoke status; do
   "$ROOT/swangate" "$sub" --help | grep -q "Usage: swangate ${sub}" || fail "${sub} --help"
 done
-expect_fail "install without ipv6" "$ROOT/swangate" install --domain vpn.example.com
+expect_fail "install without domain" "$ROOT/swangate" install --ipv6 2001:db8::1
 expect_fail "bad backend" "$ROOT/swangate" install --domain vpn.example.com --ipv6 2001:db8::1 --backend nope
 expect_fail "issue without name" "$ROOT/swangate" issue
 ok
@@ -64,6 +64,27 @@ expect_fail "huge v6 pool" normalize_network 'fd00:10:10::/48' ipv6
 expect_eq "ipv6 normalize" "$(normalize_ipv6 '2001:0db8:0000::1')" "2001:db8::1"
 expect_eq "dns v4" "$(dns_for_family '1.1.1.1,2606:4700:4700::1111,8.8.8.8' ipv4)" "1.1.1.1,8.8.8.8"
 expect_eq "dns v6" "$(dns_for_family '1.1.1.1,2606:4700:4700::1111' ipv6)" "2606:4700:4700::1111"
+expect_eq "pick single" "$(printf 'eth0\t2001:db8::1\n' | pick_host_ipv6 '')" "2001:db8::1"
+expect_eq "pick dns" "$(printf 'eth0\t2001:db8::1\neth0\t2001:db8::2\n' | pick_host_ipv6 '' 2001:db8::2)" "2001:db8::2"
+expect_eq "pick global" "$(printf 'eth0\tfd00::1\neth0\t2001:218:2001:5000::1\n' | pick_host_ipv6 '')" "2001:218:2001:5000::1"
+expect_eq "pick iface" "$(printf 'eth0\t2001:db8::1\neth1\t2001:db8::2\n' | pick_host_ipv6 eth1)" "2001:db8::2"
+expect_fail "pick none" pick_host_ipv6 '' </dev/null
+expect_fail "pick ambiguous" eval 'printf "eth0\t2001:db8::1\neth0\t2001:db8::2\n" | pick_host_ipv6 ""'
+expect_eq "detect unique" "$(
+  list_host_ipv6() { printf 'eth0\t2001:db8::1\n'; }
+  domain_aaaa_addrs() { :; }
+  VPN_DOMAIN=vpn.example.com
+  detect_server_ipv6
+)" "2001:db8::1"
+detect_ambiguous() {
+  (
+    list_host_ipv6() { printf 'eth0\t2001:db8::1\neth0\t2001:db8::2\n'; }
+    domain_aaaa_addrs() { :; }
+    VPN_DOMAIN=vpn.example.com
+    detect_server_ipv6
+  )
+}
+expect_fail "detect ambiguous" detect_ambiguous
 
 # Distribution families.
 os_release() {

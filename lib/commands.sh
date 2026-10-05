@@ -28,19 +28,20 @@ EOF
 
 usage_install() {
   cat <<'EOF'
-Usage: swangate install --domain NAME --ipv6 ADDRESS [options]
+Usage: swangate install --domain NAME [options]
 
 Install StrongSwan IKEv2 with a Let's Encrypt server certificate and a local
 CA for client certificates. Safe to run again.
 
 Required:
   --domain NAME          VPN hostname, already pointed at this server
-  --ipv6 ADDRESS         IPv6 address already configured on this server
 
 Options:
+  --ipv6 ADDRESS         IPv6 address already configured on this server
+                         (default: detect from DNS AAAA or the host)
   --email ADDRESS        Let's Encrypt contact email
   --interface NAME       Outbound interface for NAT (default: the interface
-                         that owns --ipv6)
+                         that owns the chosen IPv6)
   --ca-country CC        Client CA country (default: CN)
   --ca-org NAME          Client CA organization (default: IKEv2)
   --pool-v4 CIDR         IPv4 virtual pool (default: 10.10.10.0/24)
@@ -165,15 +166,14 @@ server_cert_is_current() {
 warn_dns_mismatch() {
   local addrs
   have_cmd getent || return 0
-  addrs="$(getent ahostsv6 "$VPN_DOMAIN" 2>/dev/null | awk '{print $1}' | sort -u || true)"
+  addrs="$(domain_aaaa_addrs "$VPN_DOMAIN")"
   if [[ -z "$addrs" ]]; then
     warn "${VPN_DOMAIN} has no AAAA record visible from this server. Let's Encrypt and IPv6 clients need one."
     return 0
   fi
-  local addr norm
+  local addr
   while read -r addr; do
-    norm="$(normalize_ipv6 "$addr" 2>/dev/null || true)"
-    [[ "$norm" == "$VPN_IPV6" ]] && return 0
+    [[ "$addr" == "$VPN_IPV6" ]] && return 0
   done <<<"$addrs"
   warn "${VPN_DOMAIN} resolves to $(tr '\n' ' ' <<<"$addrs")but not to ${VPN_IPV6}. Continuing."
 }
@@ -268,7 +268,6 @@ cmd_install() {
   done
 
   [[ -n "$VPN_DOMAIN" ]] || die "Missing --domain. Run 'swangate install --help'."
-  [[ -n "$VPN_IPV6" ]] || die "Missing --ipv6. Run 'swangate install --help'."
   case "$backend_arg" in auto|ipsec|swanctl) ;; *) die "Unknown --backend: ${backend_arg}" ;; esac
   case "$firewall_arg" in auto|firewalld|iptables|nftables) ;; *) die "Unknown --firewall: ${firewall_arg}" ;; esac
   case "$dataplane_arg" in auto|kernel|libipsec) ;; *) die "Unknown --dataplane: ${dataplane_arg}" ;; esac
@@ -288,7 +287,6 @@ cmd_install() {
   require_cmd ip
 
   validate_domain "$VPN_DOMAIN"
-  VPN_IPV6="$(normalize_ipv6 "$VPN_IPV6")"
   validate_country "$VPN_CA_COUNTRY"
   validate_org "$VPN_CA_ORG"
   VPN_CA_CN="${VPN_CA_ORG} VPN Client CA"
@@ -304,6 +302,12 @@ cmd_install() {
   fi
   if [[ -n "$VPN_EMAIL" && ! "$VPN_EMAIL" =~ ^[^[:space:]@]+@[^[:space:]@]+$ ]]; then
     die "Invalid email address: ${VPN_EMAIL}"
+  fi
+  if [[ -n "$VPN_IPV6" ]]; then
+    VPN_IPV6="$(normalize_ipv6 "$VPN_IPV6")"
+  else
+    VPN_IPV6="$(detect_server_ipv6 "$VPN_INTERFACE")"
+    log "Detected IPv6 ${VPN_IPV6}."
   fi
   VPN_INTERFACE="$(find_ipv6_iface "$VPN_IPV6" "$VPN_INTERFACE")"
   log "Using outbound interface ${VPN_INTERFACE} for ${VPN_IPV6}."

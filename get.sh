@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Download and install the swangate command, then run the given subcommand.
-#   curl -fsSL https://raw.githubusercontent.com/alphajc/swangate/main/get.sh | sudo bash -s -- install --domain ... --ipv6 ...
+#   curl -fsSL https://raw.githubusercontent.com/alphajc/swangate/main/get.sh | sudo bash -s -- install --domain ...
 set -euo pipefail
 
 IKEV2_REPO="${IKEV2_REPO:-alphajc/swangate}"
@@ -62,7 +62,7 @@ say "Installed ${IKEV2_BIN}"
 if [[ $# -eq 0 ]]; then
   cat <<'EOF'
 Next step:
-  sudo swangate install --domain vpn.example.com --ipv6 2001:db8::1 --email admin@example.com
+  sudo swangate install --domain vpn.example.com --email admin@example.com
 EOF
   exit 0
 fi
