@@ -623,20 +623,34 @@ cmd_issue() {
   chmod 600 "$p12" "$key"
   install -m 644 "$CA_CRT_PATH" "$ca_copy"
 
-  local p12_b64 cert_type issuer_cn server_cn
+  local p12_b64 cert_type server_type issuer_cn server_cn issuer_b64 issuer_uuid chain_src
   p12_b64="$(base64 "$p12" | tr -d '\r\n')"
-  # CertificateType must match the server AUTH algorithm (LE ECDSA -> ECDSA256),
-  # not the RSA client certificate in PayloadCertificateUUID.
-  cert_type=RSA
+  # CertificateType describes PayloadCertificateUUID (client). Keep it equal to
+  # the server leaf type so iOS accepts both client signing and server AUTH.
+  cert_type="$(apple_certificate_type "$crt")"
+  server_type=RSA
   issuer_cn=""
   server_cn="$VPN_DOMAIN"
+  issuer_b64=""
+  issuer_uuid=""
   if [[ -f "$SERVER_CRT" ]]; then
-    cert_type="$(apple_certificate_type "$SERVER_CRT")"
+    server_type="$(apple_certificate_type "$SERVER_CRT")"
     issuer_cn="$(cert_common_name "$SERVER_CRT" issuer)"
     server_cn="$(cert_common_name "$SERVER_CRT" subject)"
   fi
+  if [[ "$cert_type" != "$server_type" ]]; then
+    die "Apple CertificateType mismatch: client=${cert_type} server=${server_type}. Re-run issue after fixing the server certificate."
+  fi
+  chain_src="${LETSENCRYPT_DIR}/live/${VPN_DOMAIN}/chain.pem"
+  [[ -f "$chain_src" ]] || chain_src="$SERVER_CHAIN"
+  if [[ -n "$issuer_cn" ]]; then
+    issuer_b64="$(apple_issuer_der_b64 "$SERVER_CRT" "$chain_src")" \
+      || die "Cannot embed server issuer CN '${issuer_cn}' from ${chain_src}. Apple needs this for ServerCertificateIssuerCommonName."
+    issuer_uuid="$(new_uuid)"
+  fi
   write_mobileconfig_xml "$raw" "$name" "$VPN_DOMAIN" "$p12_pass" "$p12_b64" \
-    "$(new_uuid)" "$(new_uuid)" "$(new_uuid)" "$cert_type" "$issuer_cn" "$server_cn"
+    "$(new_uuid)" "$(new_uuid)" "$(new_uuid)" "$cert_type" "$issuer_cn" "$server_cn" \
+    "$issuer_b64" "$issuer_uuid"
 
   local signer="${LETSENCRYPT_DIR}/live/${VPN_DOMAIN}/cert.pem"
   local inkey="${LETSENCRYPT_DIR}/live/${VPN_DOMAIN}/privkey.pem"
@@ -785,7 +799,7 @@ cmd_firewall_apply() {
 }
 
 cmd_renew_hook() {
-  local domain matched=0
+  local domain matched=0 old_issuer="" new_issuer=""
   require_root
   [[ -f "$(config_file)" ]] || exit 0
   load_runtime
@@ -796,9 +810,18 @@ cmd_renew_hook() {
     [[ "$matched" -eq 1 ]] || exit 0
   fi
   log "Let's Encrypt certificate renewed for ${VPN_DOMAIN}. Updating StrongSwan."
+  if [[ -f "$SERVER_CRT" ]]; then
+    old_issuer="$(cert_common_name "$SERVER_CRT" issuer 2>/dev/null || true)"
+  fi
   sync_server_cert
   write_swan_config
   restart_strongswan
+  if [[ -f "$SERVER_CRT" ]]; then
+    new_issuer="$(cert_common_name "$SERVER_CRT" issuer 2>/dev/null || true)"
+  fi
+  if [[ -n "$old_issuer" && -n "$new_issuer" && "$old_issuer" != "$new_issuer" ]]; then
+    warn "Server issuer CN changed (${old_issuer} -> ${new_issuer}). Apple profiles still name the old issuer; re-issue them: sudo swangate update --skip-self --reissue-clients"
+  fi
 }
 
 # Re-issue Apple/Windows client files for every non-revoked certificate.
