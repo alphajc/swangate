@@ -373,18 +373,22 @@ create_client_ca >/dev/null
 publish_client_ca
 openssl verify -CAfile "$CA_CRT_PATH" "$CA_PUBLISHED_CRT" >/dev/null || fail "published CA"
 mkdir -p "$CERT_DIR" "$KEY_DIR" "$CACERT_DIR"
+# Fake LE intermediate first, then sign the server leaf with it so issuer CN
+# matches chain.pem (mirrors Let's Encrypt YE2/E7 + leaf).
+live="${LETSENCRYPT_DIR}/live/${VPN_DOMAIN}"
+mkdir -p "$live"
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 30 \
-  -subj "/CN=${VPN_DOMAIN}" -keyout "$SERVER_KEY" -out "$SERVER_CRT" >/dev/null 2>&1
+  -subj "/CN=Fake LE Intermediate" -keyout "${tmp}/int.key" -out "${live}/chain.pem" >/dev/null 2>&1
+openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+  -subj "/CN=${VPN_DOMAIN}" -keyout "$SERVER_KEY" -out "${tmp}/server.csr" >/dev/null 2>&1
+openssl x509 -req -in "${tmp}/server.csr" -CA "${live}/chain.pem" -CAkey "${tmp}/int.key" \
+  -CAcreateserial -days 30 -out "$SERVER_CRT" >/dev/null 2>&1
+rm -f "${tmp}/server.csr"
 expect_eq "server key type" "$(detect_key_type "$SERVER_KEY")" ECDSA
 # sync_server_cert must keep the LE chain out of StrongSwan's CA dir and remove
 # the legacy intermediate.crt that caused IKE_AUTH CERT CERT fragmentation.
-live="${LETSENCRYPT_DIR}/live/${VPN_DOMAIN}"
-mkdir -p "$live"
 cp "$SERVER_CRT" "${live}/cert.pem"
 cp "$SERVER_KEY" "${live}/privkey.pem"
-# Fake an intermediate distinct from the leaf.
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 30 \
-  -subj "/CN=Fake LE Intermediate" -keyout "${tmp}/int.key" -out "${live}/chain.pem" >/dev/null 2>&1
 : >"${CACERT_DIR}/intermediate.crt"
 sync_server_cert >/dev/null
 [[ -f "$SERVER_CHAIN" ]] || fail "server chain missing at ${SERVER_CHAIN}"
@@ -437,7 +441,10 @@ for needle in (
     b"<key>IKESecurityAssociationParameters</key>",
     b"<key>ChildSecurityAssociationParameters</key>",
     b"<key>ServerCertificateIssuerCommonName</key>",
+    b"<string>Fake LE Intermediate</string>",
     b"<key>ServerCertificateCommonName</key>",
+    b"<string>com.apple.security.pkcs1</string>",
+    b"server-issuer.crt",
     b"<key>IPv6</key>",
     b"vpn.example.com",
 ):
@@ -506,13 +513,15 @@ grep -qx -- '--force bob' "${tmp}/update-issue.log" || fail "update reissues bob
 source "${ROOT}/lib/commands.sh"
 ok
 
-# Apple profile XML before signing.
-expect_eq "apple client cert type" "$(apple_certificate_type "${VPN_CLIENTS_DIR}/alice/alice.crt")" RSA
+# Apple profile XML before signing. ECDSA server leaf => ECDSA client cert.
+expect_eq "apple client cert type" "$(apple_certificate_type "${VPN_CLIENTS_DIR}/alice/alice.crt")" ECDSA256
 expect_eq "apple server ecdsa type" "$(apple_certificate_type "$SERVER_CRT")" ECDSA256
 expect_eq "server subject cn" "$(cert_common_name "$SERVER_CRT" subject)" "$VPN_DOMAIN"
+expect_eq "server issuer cn" "$(cert_common_name "$SERVER_CRT" issuer)" "Fake LE Intermediate"
+issuer_der_b64="$(openssl x509 -in "${LETSENCRYPT_DIR}/live/${VPN_DOMAIN}/chain.pem" -outform der | base64 | tr -d '\r\n')"
 write_mobileconfig_xml "${tmp}/p.mobileconfig" alice "$VPN_DOMAIN" pass "QUJD" \
   11111111-1111-1111-1111-111111111111 22222222-2222-2222-2222-222222222222 33333333-3333-3333-3333-333333333333 \
-  ECDSA256 "Fake LE Intermediate" "$VPN_DOMAIN"
+  ECDSA256 "Fake LE Intermediate" "$VPN_DOMAIN" "$issuer_der_b64" 44444444-4444-4444-4444-444444444444
 python3 - "${tmp}/p.mobileconfig" <<'PY' || fail "profile xml"
 import sys
 import xml.etree.ElementTree as ET
@@ -530,6 +539,8 @@ for needle in (
     "<key>ServerCertificateIssuerCommonName</key>",
     "<string>Fake LE Intermediate</string>",
     "<key>ServerCertificateCommonName</key>",
+    "<string>com.apple.security.pkcs1</string>",
+    "server-issuer.crt",
     "<key>UseConfigurationAttributeInternalIPSubnet</key>",
     "<key>Proxies</key>",
     "<key>OnDemandEnabled</key>",
