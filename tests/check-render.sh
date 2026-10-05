@@ -47,6 +47,8 @@ expect_eq() {
 # Command dispatch.
 if "$ROOT/swangate" >/dev/null 2>&1; then fail "swangate without a command should fail"; fi
 "$ROOT/swangate" help | grep -q 'install' || fail "help lists install"
+"$ROOT/swangate" help | grep -q 'update' || fail "help lists update"
+"$ROOT/swangate" update --help | grep -q 'reissue-clients' || fail "update help lists reissue"
 if "$ROOT/swangate" bogus >/dev/null 2>&1; then fail "unknown command should fail"; fi
 for sub in install issue revoke status; do
   "$ROOT/swangate" "$sub" --help | grep -q "Usage: swangate ${sub}" || fail "${sub} --help"
@@ -452,6 +454,50 @@ grep -q 'Connection:      ikev2-cert loaded' <<<"$status_out" || fail "status co
 grep -Eq 'alice +revoked' <<<"$status_out" || fail "status shows revoked alice"
 grep -Eq 'alice +valid' <<<"$status_out" || fail "status shows reissued alice"
 grep -Eq 'bob +valid' <<<"$status_out" || fail "status shows bob"
+
+# update --skip-self re-applies install from saved config and can reissue clients.
+rm -f "${tmp}/update-install.args" "${tmp}/update-issue.log"
+cmd_install() {
+  printf '%s\0' "$@" >"${tmp}/update-install.args"
+  log "mock install"
+}
+cmd_issue() {
+  printf '%s\n' "$*" >>"${tmp}/update-issue.log"
+}
+update_out="$(cmd_update --skip-self --reissue-clients 2>&1)"
+grep -q 'Re-applying VPN configuration' <<<"$update_out" || fail "update logs re-apply"
+python3 - "${tmp}/update-install.args" <<'PY' || fail "update install args"
+import sys
+args = open(sys.argv[1], "rb").read().split(b"\0")
+args = [a.decode() for a in args if a]
+need = {
+    "--domain": "vpn.example.com",
+    "--ipv6": "2001:db8::1",
+    "--interface": "eth0",
+    "--backend": "swanctl",
+    "--firewall": "nftables",
+    "--dataplane": "libipsec",
+    "--clients-dir": None,
+    "--skip-certbot": None,
+}
+it = iter(args)
+for a in it:
+    if a in need and need[a] is not None:
+        val = next(it, None)
+        if val != need[a]:
+            raise SystemExit("expected %s %s, got %s" % (a, need[a], val))
+        del need[a]
+    elif a in need:
+        del need[a]
+if need:
+    raise SystemExit("missing %s" % sorted(need))
+PY
+grep -qx -- '--force alice' "${tmp}/update-issue.log" || fail "update reissues alice"
+grep -qx -- '--force bob' "${tmp}/update-issue.log" || fail "update reissues bob"
+[[ "$(grep -c -- '--force' "${tmp}/update-issue.log")" == 2 ]] || fail "update must not reissue revoked-only names"
+# Restore real command implementations shadowed by the mocks above.
+# shellcheck source=lib/commands.sh
+source "${ROOT}/lib/commands.sh"
 ok
 
 # Apple profile XML before signing.
@@ -501,12 +547,25 @@ grep -q 'Usage: swangate' "${tmp}/get.out" || fail "get.sh runs the subcommand"
 "${tmp}/bin/swangate" status --help >/dev/null || fail "installed command runs through the symlink"
 IKEV2_TARBALL_URL="file://${tmp}/swangate.tar.gz" IKEV2_PREFIX="${tmp}/prefix/swangate" IKEV2_BIN="${tmp}/bin/swangate" \
   bash "$ROOT/get.sh" >"${tmp}/get2.out"
-grep -q 'sudo swangate install' "${tmp}/get2.out" || fail "get.sh without arguments prints the next step"
+grep -q 'sudo swangate install' "${tmp}/get2.out" || fail "get.sh without arguments prints install"
+grep -q 'sudo swangate update' "${tmp}/get2.out" || fail "get.sh without arguments prints update"
 printf 'not a tarball' >"${tmp}/bad.tar.gz"
 if IKEV2_TARBALL_URL="file://${tmp}/bad.tar.gz" IKEV2_PREFIX="${tmp}/prefix2/swangate" IKEV2_BIN="${tmp}/bin2/swangate" \
   bash "$ROOT/get.sh" help >/dev/null 2>&1; then
   fail "get.sh must reject a broken archive"
 fi
+# get.sh update must inject --skip-self so the just-installed tree is not downloaded twice.
+IKEV2_TARBALL_URL="file://${tmp}/swangate.tar.gz" IKEV2_PREFIX="${tmp}/prefix3/swangate" IKEV2_BIN="${tmp}/bin3/swangate" \
+  bash "$ROOT/get.sh" update --help >"${tmp}/get-update.out"
+grep -q 'Download the latest swangate' "${tmp}/get-update.out" || fail "get.sh update reaches update help"
+grep -q '\-\-skip-self' "${tmp}/get-update.out" || fail "update help documents --skip-self"
+# fetch_and_install_release installs from a tarball URL into a fresh prefix.
+IKEV2_PREFIX="${tmp}/prefix4/swangate"
+IKEV2_BIN="${tmp}/bin4/swangate"
+IKEV2_TARBALL_URL="file://${tmp}/swangate.tar.gz"
+fetch_and_install_release main >/dev/null
+[[ -x "${IKEV2_BIN}" && -f "${IKEV2_PREFIX}/lib/commands.sh" ]] || fail "fetch_and_install_release layout"
+grep -q 'cmd_update' "${IKEV2_PREFIX}/lib/commands.sh" || fail "fetched tree includes update"
 ok
 
 # Repository hygiene.
