@@ -630,6 +630,9 @@ write_libipsec_conf() {
   cat >"${strongswan_d}/zz-ikev2-vpn.conf" <<EOF
 # ${MANAGED_MARK}
 charon {
+    # Prefer small IKEv2 fragments (RFC 7383). Default IPv6 size (~1280) yields
+    # ~1220-byte UDP payloads that mobile networks often drop toward the phone.
+    fragment_size = 576
     plugins {
         kernel-libipsec {
             load = ${load}

@@ -862,6 +862,11 @@ cmd_update() {
 
   [[ -f "$(config_file)" ]] || die "Missing $(config_file). Run 'swangate install' first."
   load_config
+  # Shrink the stock three-DNS list so IKE_AUTH CPRP stays smaller on update.
+  if [[ "$VPN_DNS" == "1.1.1.1,8.8.8.8,2606:4700:4700::1111" ]]; then
+    VPN_DNS="1.1.1.1,2606:4700:4700::1111"
+    log "Using a shorter DNS list for smaller IKE_AUTH responses."
+  fi
 
   install_args=(
     --domain "$VPN_DOMAIN"
