@@ -179,28 +179,145 @@ new_uuid() {
   fi
 }
 
+list_host_ipv6() {
+  local include_all="${1:-}"
+  local iface fam addr rest rest_lc norm
+  while read -r _ iface fam addr rest; do
+    [[ "$fam" == "inet6" ]] || continue
+    rest_lc="${rest,,}"
+    if [[ -z "$include_all" ]]; then
+      case "$rest_lc" in
+        *temporary*|*deprecated*|*tentative*|*dadfailed*) continue ;;
+      esac
+    fi
+    norm="$(normalize_ipv6 "${addr%%/*}" 2>/dev/null || true)"
+    [[ -n "$norm" ]] || continue
+    printf '%s\t%s\n' "${iface%@*}" "$norm"
+  done < <(ip -6 -o addr show scope global)
+}
+
+# stdin: iface<TAB>addr rows. First argument is an optional interface limit;
+# remaining arguments are AAAA records for the VPN domain.
+pick_host_ipv6() {
+  python3 /dev/fd/3 "$@" 3<<'PY'
+import ipaddress
+import sys
+
+limit = sys.argv[1] if len(sys.argv) > 1 else ""
+dns = []
+for raw in sys.argv[2:]:
+    try:
+        ip = ipaddress.ip_address(raw)
+    except ValueError:
+        continue
+    if ip.version == 6:
+        dns.append(ip.compressed)
+
+rows = []
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    iface, addr = line.split("\t", 1)
+    if limit and iface != limit:
+        continue
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        continue
+    if ip.version != 6 or ip.is_unspecified or ip.is_multicast or ip.is_link_local or ip.is_loopback:
+        continue
+    rows.append((iface, ip.compressed, ip))
+
+if not rows:
+    sys.exit(2)
+
+dns_set = set(dns)
+dns_hits = [(iface, addr, ip) for iface, addr, ip in rows if addr in dns_set]
+pool = dns_hits if dns_hits else [(iface, addr, ip) for iface, addr, ip in rows if ip.is_global]
+if not pool:
+    pool = rows
+
+addrs = {addr for _, addr, _ in pool}
+if len(addrs) == 1:
+    print(next(iter(addrs)))
+    sys.exit(0)
+
+for iface, addr, _ in pool:
+    sys.stderr.write("%s\t%s\n" % (iface, addr))
+sys.exit(3)
+PY
+}
+
+domain_aaaa_addrs() {
+  local domain="$1"
+  local addr norm
+  have_cmd getent || return 0
+  while read -r addr; do
+    [[ -n "$addr" ]] || continue
+    norm="$(normalize_ipv6 "$addr" 2>/dev/null || true)"
+    [[ -n "$norm" ]] && printf '%s\n' "$norm"
+  done < <(getent ahostsv6 "$domain" 2>/dev/null | awk '{print $1}' | sort -u)
+}
+
+detect_server_ipv6() {
+  local limit="${1:-}"
+  local rows picked err rc
+  local -a dns_addrs=()
+  rows="$(list_host_ipv6)"
+  if [[ -z "$rows" ]]; then
+    if [[ -n "$limit" ]]; then
+      die "No usable IPv6 address on interface ${limit}. Pass --ipv6 for an address already assigned to this server."
+    fi
+    die "No usable IPv6 address on this host. Configure a global IPv6 address, or pass --ipv6."
+  fi
+  mapfile -t dns_addrs < <(domain_aaaa_addrs "$VPN_DOMAIN")
+  err="$(mktemp)"
+  set +e
+  picked="$(printf '%s\n' "$rows" | pick_host_ipv6 "$limit" "${dns_addrs[@]}" 2>"$err")"
+  rc=$?
+  set -e
+  if [[ "$rc" -eq 0 && -n "$picked" ]]; then
+    rm -f "$err"
+    printf '%s\n' "$picked"
+    return 0
+  fi
+  if [[ "$rc" -eq 2 ]]; then
+    rm -f "$err"
+    if [[ -n "$limit" ]]; then
+      die "No usable IPv6 address on interface ${limit}. Pass --ipv6 for an address already assigned to this server."
+    fi
+    die "No usable IPv6 address on this host. Configure a global IPv6 address, or pass --ipv6."
+  fi
+  local listed
+  listed="$(tr '\t' ' ' <"$err" | sed 's/^/  /')"
+  rm -f "$err"
+  if [[ -n "$limit" ]]; then
+    die "Interface ${limit} has more than one IPv6 address. Pass --ipv6. Candidates:"$'\n'"${listed}"
+  fi
+  die "This host has more than one IPv6 address. Pass --ipv6. Candidates:"$'\n'"${listed}"
+}
+
 find_ipv6_iface() {
   local want="$1"
   local limit="${2:-}"
-  local iface fam addr norm found
+  local iface addr found
   found=""
-  while read -r _ iface fam addr _; do
-    [[ "$fam" == "inet6" ]] || continue
-    norm="$(normalize_ipv6 "${addr%%/*}" 2>/dev/null || true)"
-    [[ "$norm" == "$want" ]] || continue
+  while IFS=$'\t' read -r iface addr; do
+    [[ "$addr" == "$want" ]] || continue
     if [[ -n "$limit" && "$iface" != "$limit" ]]; then
       continue
     fi
     found="$iface"
     break
-  done < <(ip -6 -o addr show scope global)
+  done < <(list_host_ipv6 all)
   if [[ -z "$found" ]]; then
     if [[ -n "$limit" ]]; then
       die "IPv6 ${want} is not configured on interface ${limit}."
     fi
     die "IPv6 ${want} is not configured on this host. Pass the address that is already assigned to the server."
   fi
-  printf '%s\n' "${found%@*}"
+  printf '%s\n' "$found"
 }
 
 tcp_port_in_use() {

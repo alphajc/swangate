@@ -7,21 +7,21 @@
 在服务器上以 root 执行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alphajc/swangate/main/get.sh | sudo bash -s -- install --domain vpn.example.com --ipv6 2001:db8::1 --email admin@example.com
+curl -fsSL https://raw.githubusercontent.com/alphajc/swangate/main/get.sh | sudo bash -s -- install --domain vpn.example.com --email admin@example.com
 ```
 
-把域名、IPv6 和邮箱换成你自己的。这条命令会下载 `swangate`，装到 `/usr/local/bin/swangate`，再执行安装。之后直接用 `swangate` 管理。
+把域名和邮箱换成你自己的。这条命令会下载 `swangate`，装到 `/usr/local/bin/swangate`，再执行安装。之后直接用 `swangate` 管理。
 
 安装前确认：
 
-- 域名的 AAAA 记录已经指向这台服务器，`--ipv6` 是这台机器上已经配好的地址。
+- 域名的 AAAA 记录已经指向这台服务器。安装程序会用这条 AAAA 记录，或本机唯一的全局 IPv6。一台机器有多个 IPv6 时再加 `--ipv6`。
 - 80/tcp 没被占用，Let's Encrypt 要用它验证域名。已有有效证书时会跳过这一步。
 - 云厂商的安全组放行 udp/500 和 udp/4500。本机防火墙由安装程序处理。
 
 ## 命令
 
 ```bash
-sudo swangate install --domain vpn.example.com --ipv6 2001:db8::1 --email admin@example.com
+sudo swangate install --domain vpn.example.com --email admin@example.com
 sudo swangate issue alice
 sudo swangate revoke alice
 sudo swangate status
@@ -38,6 +38,7 @@ sudo swangate status
 
 | 参数 | 默认值 | 含义 |
 | --- | --- | --- |
+| `--ipv6` | 域名 AAAA 或本机唯一全局地址 | 服务器已有的 IPv6 |
 | `--interface` | 持有该 IPv6 的网卡 | NAT 出口 |
 | `--ca-org` | `IKEv2` | 客户端 CA 的组织名 |
 | `--ca-country` | `CN` | 客户端 CA 的国家代码 |
@@ -100,7 +101,7 @@ sudo swangate revoke alice
 ```bash
 git clone https://github.com/alphajc/swangate.git
 cd swangate
-sudo ./swangate install --domain vpn.example.com --ipv6 2001:db8::1
+sudo ./swangate install --domain vpn.example.com
 ```
 
 离线测试：`bash tests/check-render.sh`。
