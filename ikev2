@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# ikev2: install and manage an IPv6 IKEv2 VPN (StrongSwan, certificate authentication).
+set -euo pipefail
+
+IKEV2_SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+IKEV2_HOME="$(cd "$(dirname "$IKEV2_SELF")" && pwd)"
+
+# shellcheck source=lib/common.sh
+source "${IKEV2_HOME}/lib/common.sh"
+# shellcheck source=lib/distro.sh
+source "${IKEV2_HOME}/lib/distro.sh"
+# shellcheck source=lib/firewall.sh
+source "${IKEV2_HOME}/lib/firewall.sh"
+# shellcheck source=lib/certs.sh
+source "${IKEV2_HOME}/lib/certs.sh"
+# shellcheck source=lib/commands.sh
+source "${IKEV2_HOME}/lib/commands.sh"
+
+ikev2_main "$@"
