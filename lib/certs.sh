@@ -294,10 +294,10 @@ conn ikev2-cert
     auto=add
     type=tunnel
     compress=no
-    # accept: announce/receive IKE fragments but do not send them. Sending
-    # EF(1/2)+EF(2/2) often fails on mobile IPv6 paths (client retransmits
-    # IKE_AUTH, then DPD times out) even when the leaf cert alone is used.
-    fragmentation=accept
+    # yes + charon.fragment_size=576: iOS sends fragmented IKE_AUTH; RFC 7383
+    # says the responder should answer in kind. A single ~1376-byte reply is
+    # over the IPv6 minimum MTU and is dropped on many mobile paths.
+    fragmentation=yes
     forceencaps=yes
     mobike=no
     ike=aes256-sha256-modp2048,aes128-sha256-modp2048,aes256-sha1-modp2048
@@ -353,9 +353,9 @@ connections {
         local_addrs = %any
         proposals = aes256-sha256-modp2048,aes128-sha256-modp2048,aes256-sha1-modp2048
         pools = ikev2-vpn-v4,ikev2-vpn-v6
-        # accept: announce/receive IKE fragments but do not send them. Sending
-        # EF fragments often fails on mobile IPv6 paths even with a single leaf cert.
-        fragmentation = accept
+        # yes + charon.fragment_size=576: mirror iOS fragmented IKE_AUTH and keep
+        # each UDP datagram under the IPv6 minimum MTU on mobile paths.
+        fragmentation = yes
         encap = yes
         mobike = no
         dpd_delay = 30s
