@@ -16,7 +16,7 @@ curl -fsSL https://raw.githubusercontent.com/alphajc/swangate/main/get.sh | sudo
 
 - 域名的 AAAA 记录已经指向这台服务器。安装程序会用这条 AAAA 记录，或本机唯一的全局 IPv6。一台机器有多个 IPv6 时再加 `--ipv6`。
 - 80/tcp 没被占用，Let's Encrypt 要用它验证域名。已有有效证书时会跳过这一步。
-- 云厂商的安全组放行 udp/500 和 udp/4500。本机防火墙由安装程序处理。
+- 云厂商安全组放行 IPv6 的 UDP/500、UDP/4500，以及证书申请和续期用的 TCP/80。本机防火墙由安装程序处理。规则见「云主机安全组」。
 
 ## 命令
 
@@ -74,6 +74,35 @@ NixOS、Gentoo、Void 以及其他系统不支持，安装程序会在改动任�
 - **防火墙**：正在运行的 firewalld 优先；否则用 iptables；再否则用 nftables。iptables 和 nftables 规则会在开机时自动恢复。
 - **数据通道**：iOS 只用 AES-CBC + SHA2-256 建立数据通道。内核不支持这组算法时（会报 `Requested type not found`），自动改用 StrongSwan 的用户态 `kernel-libipsec`。子 SA 优先协商带 DH14 的 PFS，并保留不含 DH 的算法给旧客户端。
 - **内核参数**：写入 `/etc/sysctl.d/99-ikev2-vpn.conf`，打开转发，关闭反向路径过滤和 ICMP 重定向，避免 IPsec 流量被丢掉。内核支持时启用 BBR，并加大连接跟踪表和 UDP 超时，减少 NAT-T 映射过期。思路参考 [setup-ipsec-vpn](https://github.com/hwdsl2/setup-ipsec-vpn)，不包含它的 L2TP 和 Libreswan。
+
+## 云主机安全组
+
+云安全组（以及部分厂商额外的网络 ACL）和本机防火墙是两层。`swangate install` 只改本机的 firewalld、iptables 或 nftables，改不到控制台里的规则。
+
+VPN 入口是 IPv6。入站来源填 IPv6；客户端地址不固定时用 `::/0`。
+
+| 协议 | 端口 | 方向 | 地址族 | 用途 |
+| --- | --- | --- | --- | --- |
+| UDP | 500 | 入站 | IPv6 | IKE 协商从这里开始 |
+| UDP | 4500 | 入站 | IPv6 | 后续的 IKE 和 ESP。服务端强制把 ESP 封装进 UDP |
+| TCP | 80 | 入站 | IPv6 | Let's Encrypt 的 HTTP-01。没有有效证书时安装会用到，之后续期也会用到。已经有证书，并且安装时加了 `--skip-certbot`，这条可以不开放 |
+| ICMPv6 | Packet Too Big（类型 2） | 入站 | IPv6 | 告知路径 MTU。安装程序会钳制 TCP MSS，大包仍然依赖这条 ICMP |
+
+ESP 封装在 UDP/4500 里，安全组不用再放行 IP 协议 50。控制台里的「自定义协议」或「协议号」不必填 50。
+
+管理用的 SSH（常见是 TCP/22）按你自己的来源限制，和 VPN 无关。出站保持默认放行即可，certbot 要能访问 Let's Encrypt。
+
+Let's Encrypt 会顺着域名的 AAAA 记录访问 80/tcp。域名如果同时有 A 记录，IPv4 的 80/tcp 也要放行。
+
+厂商控制台里 IPv4 和 IPv6 经常是两组规则。只给 `0.0.0.0/0` 打开 UDP/500 和 UDP/4500 时，IPv6 客户端仍然连不上。有网络 ACL 时，安全组和 ACL 都要放行上表里的端口。
+
+- **阿里云 ECS**：在这台实例的安全组里添加 IPv6 入站规则，授权对象填 `::/0`。
+- **腾讯云 CVM**：安全组入站选择 IPv6，来源填 `::/0`。
+- **华为云 ECS**：安全组按 IPv6 单独授权，来源填 `::/0`。
+- **AWS**：安全组入站来源填 `::/0`。
+- **GCP**：VPC 防火墙规则的来源 IP 范围填 IPv6，例如 `::/0`。
+
+连不上时，先在控制台确认规则挂在这台实例上，并且地址族是 IPv6。然后在服务器上执行 `sudo swangate status`，看 `Firewall` 是 firewalld、iptables 还是 nftables。安装程序会在这一层放行 UDP/500 和 UDP/4500。
 
 ## 客户端
 
