@@ -133,18 +133,83 @@ self_install() {
   fi
 }
 
-write_sysctl() {
-  local file=/etc/sysctl.d/99-ikev2-vpn.conf
-  mkdir -p /etc/sysctl.d
-  cat >"$file" <<EOF
+# Prints sysctl settings. $1 is the outbound interface (dots become slashes).
+# $2 is yes to enable BBR. $3 is yes to raise conntrack limits.
+sysctl_settings() {
+  local iface="$1"
+  local bbr="${2:-no}"
+  local conntrack="${3:-no}"
+  local sysctl_iface="${iface//./\/}"
+  cat <<EOF
 # ${MANAGED_MARK}
 net.ipv4.ip_forward = 1
 net.ipv6.conf.all.forwarding = 1
 net.ipv6.conf.default.forwarding = 1
 net.ipv6.conf.all.accept_ra = 2
 net.ipv6.conf.default.accept_ra = 2
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.default.rp_filter = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+net.ipv4.conf.all.src_valid_mark = 1
+net.ipv4.icmp_ignore_bogus_error_responses = 1
+net.ipv4.tcp_mtu_probing = 1
+net.core.rmem_max = 12582912
+net.core.wmem_max = 12582912
+net.ipv4.tcp_rmem = 10240 87380 12582912
+net.ipv4.tcp_wmem = 10240 87380 12582912
 EOF
-  sysctl -p "$file" >/dev/null
+  if [[ -n "$sysctl_iface" ]]; then
+    cat <<EOF
+net.ipv4.conf.${sysctl_iface}.rp_filter = 0
+net.ipv4.conf.${sysctl_iface}.send_redirects = 0
+net.ipv6.conf.${sysctl_iface}.forwarding = 1
+net.ipv6.conf.${sysctl_iface}.accept_ra = 2
+EOF
+  fi
+  if [[ "$bbr" == "yes" ]]; then
+    cat <<EOF
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+EOF
+  fi
+  if [[ "$conntrack" == "yes" ]]; then
+    cat <<EOF
+net.netfilter.nf_conntrack_max = 262144
+net.netfilter.nf_conntrack_udp_timeout = 60
+net.netfilter.nf_conntrack_udp_timeout_stream = 300
+EOF
+  fi
+}
+
+# True when this kernel can use BBR. tcp_bbr is loaded earlier, when it exists.
+kernel_supports_bbr() {
+  [[ -r /proc/sys/net/ipv4/tcp_congestion_control ]] || return 1
+  [[ -r /proc/sys/net/ipv4/tcp_available_congestion_control ]] || return 1
+  grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control
+}
+
+# True when conntrack sysctls are present. They appear only after nf_conntrack loads.
+kernel_has_conntrack() {
+  [[ -e /proc/sys/net/netfilter/nf_conntrack_max ]] \
+    && [[ -e /proc/sys/net/netfilter/nf_conntrack_udp_timeout ]] \
+    && [[ -e /proc/sys/net/netfilter/nf_conntrack_udp_timeout_stream ]]
+}
+
+write_sysctl() {
+  local file=/etc/sysctl.d/99-ikev2-vpn.conf
+  local bbr=no conntrack=no
+  kernel_supports_bbr && bbr=yes
+  kernel_has_conntrack && conntrack=yes
+  mkdir -p /etc/sysctl.d
+  sysctl_settings "$VPN_INTERFACE" "$bbr" "$conntrack" >"$file"
+  chmod 644 "$file"
+  # -e skips keys this kernel does not have, same approach as setup-ipsec-vpn.
+  sysctl -e -q -p "$file" || warn "Some kernel settings in ${file} were not applied."
 }
 
 install_renew_hook() {

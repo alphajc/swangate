@@ -239,7 +239,10 @@ config setup
 conn %default
     keyexchange=ikev2
     dpdaction=clear
-    dpddelay=300s
+    dpddelay=30s
+    dpdtimeout=120s
+    ikelifetime=24h
+    lifetime=8h
 
 conn ikev2-cert
     auto=add
@@ -248,7 +251,7 @@ conn ikev2-cert
     fragmentation=yes
     forceencaps=yes
     ike=aes256-sha256-modp2048,aes128-sha256-modp2048,aes256-sha1-modp2048
-    esp=aes256-sha256,aes128-sha256,aes256gcm16,aes128gcm16,aes256-sha1
+    esp=aes256-sha256-modp2048,aes128-sha256-modp2048,aes256gcm16-modp2048,aes128gcm16-modp2048,aes256-sha256,aes128-sha256,aes256gcm16,aes128gcm16,aes256-sha1
     left=%any
     leftid=${VPN_DOMAIN}
     leftcert=server.crt
@@ -298,11 +301,13 @@ connections {
     ikev2-cert {
         version = 2
         local_addrs = %any
-        proposals = aes256-sha256-modp2048,aes128-sha256-modp2048,aes256-sha1-modp2048,default
+        proposals = aes256-sha256-modp2048,aes128-sha256-modp2048,aes256-sha1-modp2048
         pools = ikev2-vpn-v4,ikev2-vpn-v6
         fragmentation = yes
         encap = yes
-        dpd_delay = 300s
+        dpd_delay = 30s
+        dpd_timeout = 120s
+        rekey_time = 24h
         send_cert = always
         unique = never
         local {
@@ -317,7 +322,9 @@ connections {
         children {
             ikev2-cert {
                 local_ts = 0.0.0.0/0,::/0
-                esp_proposals = aes256-sha256,aes128-sha256,aes256gcm16,aes128gcm16,aes256-sha1,default
+                esp_proposals = aes256-sha256-modp2048,aes128-sha256-modp2048,aes256gcm16-modp2048,aes128gcm16-modp2048,aes256-sha256,aes128-sha256,aes256gcm16,aes128gcm16,aes256-sha1
+                life_time = 8h
+                rekey_time = 7h
                 dpd_action = clear
             }
         }

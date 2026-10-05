@@ -48,6 +48,8 @@ select_firewall() {
 }
 
 # One rule per line: binary table chain args...
+# Filter rules are inserted at position 1, so they are listed in reverse of the
+# desired chain order: INVALID ends up first, then established, then IPsec.
 iptables_rules() {
   local dataplane="$1"
   local pool4="$2"
@@ -55,32 +57,45 @@ iptables_rules() {
   local iface="$4"
   local bin pool
   for bin in iptables ip6tables; do
-    printf '%s filter INPUT -p udp --dport 500 -j ACCEPT\n' "$bin"
     printf '%s filter INPUT -p udp --dport 4500 -j ACCEPT\n' "$bin"
+    printf '%s filter INPUT -p udp --dport 500 -j ACCEPT\n' "$bin"
+    printf '%s filter INPUT -m conntrack --ctstate INVALID -j DROP\n' "$bin"
     if [[ "$dataplane" == "libipsec" ]]; then
-      printf '%s filter FORWARD -i ipsec0 -j ACCEPT\n' "$bin"
       printf '%s filter FORWARD -o ipsec0 -j ACCEPT\n' "$bin"
+      printf '%s filter FORWARD -i ipsec0 -j ACCEPT\n' "$bin"
     else
-      printf '%s filter FORWARD -m policy --pol ipsec --dir in -j ACCEPT\n' "$bin"
       printf '%s filter FORWARD -m policy --pol ipsec --dir out -j ACCEPT\n' "$bin"
+      printf '%s filter FORWARD -m policy --pol ipsec --dir in -j ACCEPT\n' "$bin"
     fi
+    printf '%s filter FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n' "$bin"
+    printf '%s filter FORWARD -m conntrack --ctstate INVALID -j DROP\n' "$bin"
     pool="$pool4"
     [[ "$bin" == "ip6tables" ]] && pool="$pool6"
-    printf '%s nat POSTROUTING -s %s -o %s -j MASQUERADE\n' "$bin" "$pool" "$iface"
+    printf '%s nat POSTROUTING -s %s -o %s -m policy --dir out --pol none -j MASQUERADE\n' \
+      "$bin" "$pool" "$iface"
     printf '%s mangle FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\n' "$bin"
   done
 }
 
 apply_iptables() {
-  local line bin table
+  local line bin table pool iface="$VPN_INTERFACE"
   local -a args
+  # Drop the previous masquerade rule that also matched IPsec packets.
+  for bin in iptables ip6tables; do
+    pool="$VPN_POOL_V4"
+    [[ "$bin" == "ip6tables" ]] && pool="$VPN_POOL_V6"
+    "$bin" -t nat -D POSTROUTING -s "$pool" -o "$iface" -j MASQUERADE 2>/dev/null || true
+  done
   while read -r line; do
     read -r -a args <<<"$line"
     bin="${args[0]}"
     table="${args[1]}"
     args=("${args[@]:2}")
     "$bin" -t "$table" -C "${args[@]}" 2>/dev/null && continue
-    if [[ "$table" == "filter" ]]; then
+    if [[ "$line" == *conntrack* ]]; then
+      "$bin" -t "$table" -I "${args[0]}" 1 "${args[@]:1}" 2>/dev/null \
+        || warn "${bin}: conntrack match unavailable. Skipping state rules."
+    elif [[ "$table" == "filter" ]]; then
       "$bin" -t "$table" -I "${args[0]}" 1 "${args[@]:1}"
     elif [[ "$line" == *TCPMSS* ]]; then
       "$bin" -t "$table" -A "${args[@]}" 2>/dev/null \
@@ -104,6 +119,7 @@ nftables_ruleset() {
   else
     forward_match=$'        meta secpath exists accept\n        rt ipsec exists accept'
   fi
+  # "rt ipsec missing" is the nft 1.0 equivalent of iptables policy --pol none.
   cat <<EOF
 # ${MANAGED_MARK}
 table inet ikev2_vpn {}
@@ -111,10 +127,13 @@ delete table inet ikev2_vpn
 table inet ikev2_vpn {
     chain input {
         type filter hook input priority -5; policy accept;
+        ct state invalid drop
         udp dport { 500, 4500 } accept
     }
     chain forward {
         type filter hook forward priority -5; policy accept;${mss_rule}
+        ct state invalid drop
+        ct state { established, related } accept
 ${forward_match}
     }
 }
@@ -123,7 +142,7 @@ delete table ip ikev2_vpn_nat
 table ip ikev2_vpn_nat {
     chain postrouting {
         type nat hook postrouting priority 100; policy accept;
-        ip saddr ${pool4} oifname "${iface}" masquerade
+        ip saddr ${pool4} oifname "${iface}" rt ipsec missing masquerade
     }
 }
 table ip6 ikev2_vpn_nat {}
@@ -131,7 +150,7 @@ delete table ip6 ikev2_vpn_nat
 table ip6 ikev2_vpn_nat {
     chain postrouting {
         type nat hook postrouting priority 100; policy accept;
-        ip6 saddr ${pool6} oifname "${iface}" masquerade
+        ip6 saddr ${pool6} oifname "${iface}" rt ipsec missing masquerade
     }
 }
 EOF
@@ -156,15 +175,37 @@ firewalld_zone() {
   printf '%s\n' "$zone"
 }
 
+# Adds one permanent direct rule when it is not already present.
+firewalld_direct_add() {
+  if firewall-cmd --permanent --direct --query-rule "$@" >/dev/null 2>&1; then
+    return 0
+  fi
+  firewall-cmd --permanent --direct --add-rule "$@" >/dev/null 2>&1
+}
+
 apply_firewalld() {
-  local zone fam
+  local zone fam pool
   zone="$(firewalld_zone)"
   firewall-cmd --permanent --zone="$zone" --add-port=500/udp --add-port=4500/udp >/dev/null
   firewall-cmd --permanent --zone="$zone" --add-service=ipsec >/dev/null 2>&1 || true
+  # Older installs masqueraded every pool packet, including ones already in IPsec.
   firewall-cmd --permanent --zone="$zone" \
-    --add-rich-rule="rule family=ipv4 source address=${VPN_POOL_V4} masquerade" >/dev/null
+    --remove-rich-rule="rule family=ipv4 source address=${VPN_POOL_V4} masquerade" >/dev/null 2>&1 || true
   firewall-cmd --permanent --zone="$zone" \
-    --add-rich-rule="rule family=ipv6 source address=${VPN_POOL_V6} masquerade" >/dev/null
+    --remove-rich-rule="rule family=ipv6 source address=${VPN_POOL_V6} masquerade" >/dev/null 2>&1 || true
+  for fam in ipv4 ipv6; do
+    pool="$VPN_POOL_V4"
+    [[ "$fam" == "ipv6" ]] && pool="$VPN_POOL_V6"
+    firewalld_direct_add "$fam" filter INPUT 0 -m conntrack --ctstate INVALID -j DROP \
+      || warn "firewalld refused the ${fam} INVALID drop on INPUT."
+    firewalld_direct_add "$fam" filter FORWARD 0 -m conntrack --ctstate INVALID -j DROP \
+      || warn "firewalld refused the ${fam} INVALID drop on FORWARD."
+    firewalld_direct_add "$fam" filter FORWARD 1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT \
+      || warn "firewalld refused the ${fam} established rule."
+    firewalld_direct_add "$fam" nat POSTROUTING 0 -s "$pool" -o "$VPN_INTERFACE" \
+      -m policy --dir out --pol none -j MASQUERADE \
+      || warn "firewalld refused the ${fam} policy-aware masquerade rule."
+  done
   firewall-cmd --permanent --zone="$zone" --add-forward >/dev/null 2>&1 || true
   firewall-cmd --permanent --zone=trusted --add-source="$VPN_POOL_V4" >/dev/null
   firewall-cmd --permanent --zone=trusted --add-source="$VPN_POOL_V6" >/dev/null
