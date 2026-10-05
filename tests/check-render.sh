@@ -433,7 +433,7 @@ for needle in (
     b"<key>IKEv2</key>",
     b"<string>Certificate</string>",
     b"<key>CertificateType</key>",
-    b"<string>RSA</string>",
+    b"<string>ECDSA256</string>",
     b"<key>IKESecurityAssociationParameters</key>",
     b"<key>ChildSecurityAssociationParameters</key>",
     b"<key>ServerCertificateIssuerCommonName</key>",
@@ -512,7 +512,7 @@ expect_eq "apple server ecdsa type" "$(apple_certificate_type "$SERVER_CRT")" EC
 expect_eq "server subject cn" "$(cert_common_name "$SERVER_CRT" subject)" "$VPN_DOMAIN"
 write_mobileconfig_xml "${tmp}/p.mobileconfig" alice "$VPN_DOMAIN" pass "QUJD" \
   11111111-1111-1111-1111-111111111111 22222222-2222-2222-2222-222222222222 33333333-3333-3333-3333-333333333333 \
-  RSA "Fake LE Intermediate" "$VPN_DOMAIN"
+  ECDSA256 "Fake LE Intermediate" "$VPN_DOMAIN"
 python3 - "${tmp}/p.mobileconfig" <<'PY' || fail "profile xml"
 import sys
 import xml.etree.ElementTree as ET
@@ -524,7 +524,7 @@ if "<integer>0</integer>" in text:
     raise SystemExit("boolean fields must use true/false tags")
 for needle in (
     "<key>CertificateType</key>",
-    "<string>RSA</string>",
+    "<string>ECDSA256</string>",
     "<key>IKESecurityAssociationParameters</key>",
     "<key>ChildSecurityAssociationParameters</key>",
     "<key>ServerCertificateIssuerCommonName</key>",

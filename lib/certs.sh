@@ -80,7 +80,10 @@ detect_key_type() {
   fi
 }
 
-# Apple IKEv2 CertificateType for the client certificate in PayloadCertificateUUID.
+# Apple IKEv2 CertificateType for the server authentication algorithm.
+# iOS compares this to the server's AUTH method (e.g. DigitalSignatureECDSA256).
+# Using RSA here while the server has a Let's Encrypt ECDSA leaf fails with:
+# "not compatible with configuration RSASignature".
 apple_certificate_type() {
   local crt="$1"
   local text
@@ -596,8 +599,9 @@ list_issued_clients() {
 # Apple .mobileconfig layout follows hwdsl2/setup-ipsec-vpn extras/ikev2setup.sh
 # (create_mobileconfig) and Apple's VPN.IKEv2 schema, with SwanGate-specific
 # choices: AES-CBC+SHA2-256+DH14 (iOS/kernel), EnablePFS, dual-stack OverridePrimary,
-# and Let's Encrypt ServerCertificate* fields. Client certs are RSA, so CertificateType
-# is RSA; Apple requires ServerCertificateIssuerCommonName when CertificateType is set.
+# and Let's Encrypt ServerCertificate* fields. CertificateType must match the
+# server leaf (ECDSA256 for default certbot ECDSA); Apple also requires
+# ServerCertificateIssuerCommonName when CertificateType is set.
 write_mobileconfig_xml() {
   local dest="$1"
   local name="$2"
