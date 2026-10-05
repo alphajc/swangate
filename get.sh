@@ -61,12 +61,18 @@ say "Installed ${IKEV2_BIN}"
 
 if [[ $# -eq 0 ]]; then
   cat <<'EOF'
-Next step:
-  sudo swangate install
+Next steps:
+  sudo swangate install          # first-time VPN setup
+  sudo swangate update           # already installed: pull latest and re-apply
 EOF
   exit 0
 fi
 
 rm -rf "$work"
 trap - EXIT
+# get.sh already installed this release; skip a second download for update.
+if [[ "$1" == "update" ]]; then
+  shift
+  exec "$IKEV2_BIN" update --skip-self "$@"
+fi
 exec "$IKEV2_BIN" "$@"

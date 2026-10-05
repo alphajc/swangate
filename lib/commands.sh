@@ -9,6 +9,9 @@ fi
 
 IKEV2_PREFIX="${IKEV2_PREFIX:-/usr/local/lib/swangate}"
 IKEV2_BIN="${IKEV2_BIN:-/usr/local/bin/swangate}"
+IKEV2_REPO="${IKEV2_REPO:-alphajc/swangate}"
+IKEV2_REF="${IKEV2_REF:-main}"
+IKEV2_TARBALL_URL="${IKEV2_TARBALL_URL:-}"
 RENEW_HOOK="${LETSENCRYPT_DIR}/renewal-hooks/deploy/ikev2-vpn"
 
 usage_main() {
@@ -16,7 +19,8 @@ usage_main() {
 Usage: swangate <command> [options]
 
 Commands:
-  install   Install or update the IPv6 IKEv2 VPN server
+  install   Install or reconfigure the IPv6 IKEv2 VPN server
+  update    Download the latest swangate and re-apply saved settings
   issue     Issue a client certificate
   revoke    Revoke a client certificate
   status    Show server, firewall, and client status
@@ -110,6 +114,27 @@ dataplane, firewall, and issued client certificates.
 EOF
 }
 
+usage_update() {
+  cat <<'EOF'
+Usage: swangate update [options]
+
+Download the latest swangate release, replace /usr/local/lib/swangate,
+and re-apply the VPN configuration saved by the last install.
+
+On a host that still runs an older swangate without this command:
+  curl -fsSL https://raw.githubusercontent.com/alphajc/swangate/main/get.sh | sudo bash -s -- update
+
+Options:
+  --ref REF            Git ref to download (default: main, or IKEV2_REF)
+  --skip-self          Do not download; only re-apply config with current code
+  --reissue-clients    Re-issue profiles for every non-revoked client
+  -h, --help           Show this help
+
+Environment:
+  IKEV2_REPO IKEV2_REF IKEV2_TARBALL_URL IKEV2_PREFIX IKEV2_BIN
+EOF
+}
+
 # Reads "--name value" or "--name=value" into OPT_VALUE and sets OPT_SHIFT.
 take_value() {
   local opt="$1"
@@ -147,6 +172,64 @@ self_install() {
   if [[ -f /usr/local/lib/ikev2-vpn/certs.sh ]]; then
     rm -rf /usr/local/lib/ikev2-vpn
   fi
+}
+
+# True when this process is running the installed /usr/local copy (not a git tree).
+running_from_prefix() {
+  local current installed bin
+  current="$(readlink -f "$IKEV2_SELF")"
+  installed="$(readlink -f "${IKEV2_PREFIX}/swangate" 2>/dev/null || true)"
+  bin="$(readlink -f "$IKEV2_BIN" 2>/dev/null || true)"
+  [[ -n "$installed" && "$current" == "$installed" ]] && return 0
+  [[ -n "$bin" && "$current" == "$bin" ]] && return 0
+  return 1
+}
+
+# Atomically install swangate files from a source tree into IKEV2_PREFIX.
+install_tree_to_prefix() {
+  local src="$1"
+  [[ -f "${src}/swangate" && -f "${src}/lib/commands.sh" ]] \
+    || die "Source tree is missing swangate or lib/commands.sh: ${src}"
+  rm -rf "${IKEV2_PREFIX}.new"
+  install -d -m 755 "${IKEV2_PREFIX}.new/lib"
+  install -m 755 "${src}/swangate" "${IKEV2_PREFIX}.new/swangate"
+  install -m 644 "${src}"/lib/*.sh "${IKEV2_PREFIX}.new/lib/"
+  rm -rf "$IKEV2_PREFIX"
+  mv "${IKEV2_PREFIX}.new" "$IKEV2_PREFIX"
+  install -d -m 755 "$(dirname "$IKEV2_BIN")"
+  ln -sfn "${IKEV2_PREFIX}/swangate" "$IKEV2_BIN"
+  if [[ -f /usr/local/lib/ikev2-vpn/certs.sh ]]; then
+    rm -rf /usr/local/lib/ikev2-vpn
+  fi
+  log "Installed ${IKEV2_BIN}"
+}
+
+# Download a release tarball and install it into IKEV2_PREFIX.
+fetch_and_install_release() {
+  local ref="${1:-$IKEV2_REF}"
+  local url work src
+  url="${IKEV2_TARBALL_URL:-https://codeload.github.com/${IKEV2_REPO}/tar.gz/${ref}}"
+  command -v tar >/dev/null 2>&1 || die "tar is required to update swangate."
+  command -v gzip >/dev/null 2>&1 || die "gzip is required to update swangate."
+  work="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$work'" RETURN
+  log "Downloading ${url}"
+  if have_cmd curl; then
+    curl -fsSL --retry 3 -o "${work}/swangate.tar.gz" "$url" || die "Download failed: ${url}"
+  elif have_cmd wget; then
+    wget -q -O "${work}/swangate.tar.gz" "$url" || die "Download failed: ${url}"
+  else
+    die "curl or wget is required to update swangate."
+  fi
+  mkdir -p "${work}/src"
+  tar -xzf "${work}/swangate.tar.gz" -C "${work}/src" || die "The downloaded archive is not a valid tarball."
+  src="$(find "${work}/src" -maxdepth 2 -type f -name swangate | head -n 1)"
+  [[ -n "$src" ]] || die "The archive does not contain the swangate command."
+  src="$(dirname "$src")"
+  install_tree_to_prefix "$src"
+  trap - RETURN
+  rm -rf "$work"
 }
 
 # Prints sysctl settings. $1 is the outbound interface (dots become slashes).
@@ -348,7 +431,11 @@ cmd_install() {
     shift "$OPT_SHIFT"
   done
 
-  if [[ -z "$VPN_DOMAIN" || -z "$VPN_EMAIL" ]] && [[ -t 0 ]]; then
+  # update (and other non-interactive callers) set VPN_ASSUME_DEFAULTS=1 so an
+  # empty optional --email does not block on a TTY prompt.
+  if [[ "${VPN_ASSUME_DEFAULTS:-0}" != "1" ]] \
+    && { [[ -z "$VPN_DOMAIN" ]] || [[ -z "$VPN_EMAIL" ]]; } \
+    && [[ -t 0 ]]; then
     prompt_install_inputs
   fi
   [[ -n "$VPN_DOMAIN" ]] || die "Missing --domain. Pass --domain or run 'swangate install' in a terminal."
@@ -710,11 +797,110 @@ cmd_renew_hook() {
   restart_strongswan
 }
 
+# Re-issue Apple/Windows client files for every non-revoked certificate.
+reissue_valid_clients() {
+  local status name serial count=0
+  while read -r status name serial; do
+    [[ "$status" == "valid" ]] || continue
+    [[ -n "$name" ]] || continue
+    log "Re-issuing client profile for ${name}."
+    cmd_issue --force "$name"
+    count=$((count + 1))
+  done < <(list_issued_clients)
+  if [[ "$count" -eq 0 ]]; then
+    log "No valid client certificates to re-issue."
+  else
+    log "Re-issued ${count} client profile(s)."
+  fi
+}
+
+cmd_update() {
+  local skip_self=0 reissue=0 ref="$IKEV2_REF"
+  local -a exec_args install_args
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help)
+        usage_update
+        return 0
+        ;;
+      --skip-self)
+        skip_self=1
+        ;;
+      --reissue-clients)
+        reissue=1
+        ;;
+      --ref)
+        shift
+        [[ $# -gt 0 ]] || die "Missing value for --ref"
+        ref="$1"
+        ;;
+      --ref=*)
+        ref="${1#--ref=}"
+        ;;
+      *)
+        die "Unknown option for update: $1. Run 'swangate update --help'."
+        ;;
+    esac
+    shift
+  done
+
+  require_root
+
+  if [[ "$skip_self" -eq 0 ]]; then
+    if running_from_prefix; then
+      fetch_and_install_release "$ref"
+    else
+      install_tree_to_prefix "$(cd "$IKEV2_HOME" && pwd -P)"
+    fi
+    exec_args=(update --skip-self)
+    [[ "$reissue" -eq 1 ]] && exec_args+=(--reissue-clients)
+    exec "$IKEV2_BIN" "${exec_args[@]}"
+  fi
+
+  [[ -f "$(config_file)" ]] || die "Missing $(config_file). Run 'swangate install' first."
+  load_config
+
+  install_args=(
+    --domain "$VPN_DOMAIN"
+    --ipv6 "$VPN_IPV6"
+    --interface "$VPN_INTERFACE"
+    --ca-country "$VPN_CA_COUNTRY"
+    --ca-org "$VPN_CA_ORG"
+    --pool-v4 "$VPN_POOL_V4"
+    --pool-v6 "$VPN_POOL_V6"
+    --dns "$VPN_DNS"
+    --clients-dir "$VPN_CLIENTS_DIR"
+    --backend "$VPN_BACKEND"
+    --firewall "$VPN_FIREWALL"
+    --dataplane "$VPN_DATAPLANE"
+    --skip-certbot
+  )
+  [[ -n "${VPN_EMAIL:-}" ]] && install_args+=(--email "$VPN_EMAIL")
+
+  log "Re-applying VPN configuration for ${VPN_DOMAIN}."
+  VPN_ASSUME_DEFAULTS=1 cmd_install "${install_args[@]}"
+
+  if [[ "$reissue" -eq 1 ]]; then
+    reissue_valid_clients
+  else
+    cat <<'EOF'
+
+Client Apple profiles were not regenerated.
+Refresh one phone with:
+  sudo swangate issue --force <name>
+Or re-issue every valid client:
+  sudo swangate update --skip-self --reissue-clients
+EOF
+  fi
+}
+
 swangate_main() {
   local cmd="${1:-}"
   [[ $# -gt 0 ]] && shift
   case "$cmd" in
     install) cmd_install "$@" ;;
+    update) cmd_update "$@" ;;
     issue) cmd_issue "$@" ;;
     revoke) cmd_revoke "$@" ;;
     status) cmd_status "$@" ;;
