@@ -34,6 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/alphajc/swangate/main/get.sh | sudo
 
 ```bash
 sudo swangate install
+sudo swangate update
 sudo swangate issue alice
 sudo swangate revoke alice
 sudo swangate status
@@ -41,10 +42,23 @@ sudo swangate status
 
 | 子命令 | 作用 |
 | --- | --- |
-| `install` | 安装或更新服务端。重复执行是安全的：不会重建客户端 CA，也不会重复加防火墙规则 |
+| `install` | 安装或重新配置服务端。重复执行是安全的：不会重建客户端 CA，也不会重复加防火墙规则 |
+| `update` | 从 GitHub 拉取最新 `swangate`，按上次保存的参数重新应用服务端配置 |
 | `issue <名字>` | 签发客户端证书；`--force` 先吊销旧证书再重签 |
 | `revoke <名字>` | 吊销证书、发布 CRL 并重启 StrongSwan，立刻拒绝该证书 |
 | `status` | 查看服务、连接、证书到期时间、数据通道、防火墙和所有客户端 |
+
+已有服务器升级到新版本：
+
+```bash
+# 旧版本没有 update 子命令时，用 get.sh 安装新工具并立刻 update
+curl -fsSL https://raw.githubusercontent.com/alphajc/swangate/main/get.sh | sudo bash -s -- update
+
+# 同时重签所有未吊销客户端的 .mobileconfig / .p12
+curl -fsSL https://raw.githubusercontent.com/alphajc/swangate/main/get.sh | sudo bash -s -- update --reissue-clients
+```
+
+`update` 默认不跑 certbot（沿用现有 Let's Encrypt 证书），也不自动重签客户端；需要新描述文件时加 `--reissue-clients`，或对单个客户端执行 `swangate issue --force <名字>`。
 
 `swangate <子命令> --help` 列出全部参数。`install` 常用的可选参数：
 
