@@ -80,7 +80,7 @@ detect_key_type() {
   fi
 }
 
-# Apple IKEv2 CertificateType for a server certificate (RSA / ECDSA256 / ...).
+# Apple IKEv2 CertificateType for the client certificate in PayloadCertificateUUID.
 apple_certificate_type() {
   local crt="$1"
   local text
@@ -96,6 +96,30 @@ apple_certificate_type() {
   else
     printf 'RSA\n'
   fi
+}
+
+# Prints the CN from a certificate subject or issuer (RFC2253).
+cert_common_name() {
+  local crt="$1"
+  local which="$2"
+  local out
+  case "$which" in
+    subject|issuer) ;;
+    *) die "cert_common_name: expected subject or issuer" ;;
+  esac
+  out="$(openssl x509 -in "$crt" -noout "-${which}" -nameopt RFC2253 2>/dev/null)" \
+    || die "Cannot read certificate ${crt}"
+  python3 - "$out" <<'PY'
+import sys
+line = sys.argv[1]
+dn = line.split("=", 1)[1].strip() if "=" in line else line
+for item in dn.split(","):
+    key, _, value = item.partition("=")
+    if key.strip() == "CN":
+        sys.stdout.write(value.strip() + "\n")
+        raise SystemExit(0)
+raise SystemExit("CN not found")
+PY
 }
 
 subject_for_rightca() {
@@ -562,6 +586,11 @@ list_issued_clients() {
   }' "$index"
 }
 
+# Apple .mobileconfig layout follows hwdsl2/setup-ipsec-vpn extras/ikev2setup.sh
+# (create_mobileconfig) and Apple's VPN.IKEv2 schema, with SwanGate-specific
+# choices: AES-CBC+SHA2-256+DH14 (iOS/kernel), EnablePFS, dual-stack OverridePrimary,
+# and Let's Encrypt ServerCertificate* fields. Client certs are RSA, so CertificateType
+# is RSA; Apple requires ServerCertificateIssuerCommonName when CertificateType is set.
 write_mobileconfig_xml() {
   local dest="$1"
   local name="$2"
@@ -572,6 +601,17 @@ write_mobileconfig_xml() {
   local vpn_uuid="$7"
   local profile_uuid="$8"
   local cert_type="${9:-RSA}"
+  local issuer_cn="${10:-}"
+  local server_cn="${11:-$domain}"
+  local cert_type_xml="" issuer_xml="" server_cn_xml=""
+  # Apple requires ServerCertificateIssuerCommonName when CertificateType is set.
+  if [[ -n "$issuer_cn" ]]; then
+    cert_type_xml=$'\n'"                <key>CertificateType</key>"$'\n'"                <string>${cert_type}</string>"
+    issuer_xml=$'\n'"                <key>ServerCertificateIssuerCommonName</key>"$'\n'"                <string>${issuer_cn}</string>"
+  fi
+  if [[ -n "$server_cn" ]]; then
+    server_cn_xml=$'\n'"                <key>ServerCertificateCommonName</key>"$'\n'"                <string>${server_cn}</string>"
+  fi
   cat >"$dest" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -580,68 +620,75 @@ write_mobileconfig_xml() {
     <key>PayloadContent</key>
     <array>
         <dict>
-            <key>Password</key>
-            <string>${p12_pass}</string>
-            <key>PayloadCertificateFileName</key>
-            <string>${name}.p12</string>
-            <key>PayloadContent</key>
-            <data>${p12_b64}</data>
-            <key>PayloadDescription</key>
-            <string>Client certificate for IKEv2</string>
-            <key>PayloadDisplayName</key>
-            <string>IKEv2 client certificate (${name})</string>
-            <key>PayloadIdentifier</key>
-            <string>com.ikev2vpn.cert.${cert_uuid}</string>
-            <key>PayloadType</key>
-            <string>com.apple.security.pkcs12</string>
-            <key>PayloadUUID</key>
-            <string>${cert_uuid}</string>
-            <key>PayloadVersion</key>
-            <integer>1</integer>
-        </dict>
-        <dict>
             <key>IKEv2</key>
             <dict>
                 <key>AuthenticationMethod</key>
-                <string>Certificate</string>
-                <key>CertificateType</key>
-                <string>${cert_type}</string>
-                <key>PayloadCertificateUUID</key>
-                <string>${cert_uuid}</string>
-                <key>RemoteAddress</key>
-                <string>${domain}</string>
-                <key>RemoteIdentifier</key>
-                <string>${domain}</string>
-                <key>LocalIdentifier</key>
-                <string>${name}</string>
+                <string>Certificate</string>${cert_type_xml}
+                <key>ChildSecurityAssociationParameters</key>
+                <dict>
+                    <key>DiffieHellmanGroup</key>
+                    <integer>14</integer>
+                    <key>EncryptionAlgorithm</key>
+                    <string>AES-256</string>
+                    <key>IntegrityAlgorithm</key>
+                    <string>SHA2-256</string>
+                    <key>LifeTimeInMinutes</key>
+                    <integer>480</integer>
+                </dict>
                 <key>DeadPeerDetectionRate</key>
                 <string>Medium</string>
                 <key>DisableMOBIKE</key>
                 <false/>
                 <key>DisableRedirect</key>
-                <false/>
+                <true/>
                 <key>EnableCertificateRevocationCheck</key>
                 <false/>
                 <key>EnablePFS</key>
                 <true/>
-                <key>IKESAParameters</key>
+                <key>IKESecurityAssociationParameters</key>
                 <dict>
+                    <key>DiffieHellmanGroup</key>
+                    <integer>14</integer>
                     <key>EncryptionAlgorithm</key>
                     <string>AES-256</string>
                     <key>IntegrityAlgorithm</key>
                     <string>SHA2-256</string>
-                    <key>DiffieHellmanGroup</key>
-                    <integer>14</integer>
+                    <key>LifeTimeInMinutes</key>
+                    <integer>1440</integer>
                 </dict>
-                <key>ChildSAParameters</key>
-                <dict>
-                    <key>EncryptionAlgorithm</key>
-                    <string>AES-256</string>
-                    <key>IntegrityAlgorithm</key>
-                    <string>SHA2-256</string>
-                    <key>DiffieHellmanGroup</key>
-                    <integer>14</integer>
-                </dict>
+                <key>LocalIdentifier</key>
+                <string>${name}</string>
+                <key>OnDemandEnabled</key>
+                <false/>
+                <key>OnDemandRules</key>
+                <array>
+                    <dict>
+                        <key>InterfaceTypeMatch</key>
+                        <string>WiFi</string>
+                        <key>URLStringProbe</key>
+                        <string>http://captive.apple.com/hotspot-detect.html</string>
+                        <key>Action</key>
+                        <string>Connect</string>
+                    </dict>
+                    <dict>
+                        <key>InterfaceTypeMatch</key>
+                        <string>Cellular</string>
+                        <key>Action</key>
+                        <string>Disconnect</string>
+                    </dict>
+                    <dict>
+                        <key>Action</key>
+                        <string>Ignore</string>
+                    </dict>
+                </array>
+                <key>PayloadCertificateUUID</key>
+                <string>${cert_uuid}</string>
+                <key>RemoteAddress</key>
+                <string>${domain}</string>
+                <key>RemoteIdentifier</key>
+                <string>${domain}</string>${issuer_xml}${server_cn_xml}
+                <key>UseConfigurationAttributeInternalIPSubnet</key>
+                <false/>
             </dict>
             <key>IPv4</key>
             <dict>
@@ -657,6 +704,8 @@ write_mobileconfig_xml() {
             <string>Configures certificate-authenticated IKEv2 VPN for ${domain}</string>
             <key>PayloadDisplayName</key>
             <string>IKEv2 VPN (${domain})</string>
+            <key>PayloadOrganization</key>
+            <string>IKEv2 VPN</string>
             <key>PayloadIdentifier</key>
             <string>com.ikev2vpn.profile.${vpn_uuid}</string>
             <key>PayloadType</key>
@@ -665,10 +714,37 @@ write_mobileconfig_xml() {
             <string>${vpn_uuid}</string>
             <key>PayloadVersion</key>
             <integer>1</integer>
+            <key>Proxies</key>
+            <dict>
+                <key>HTTPEnable</key>
+                <false/>
+                <key>HTTPSEnable</key>
+                <false/>
+            </dict>
             <key>UserDefinedName</key>
             <string>IKEv2 - ${domain}</string>
             <key>VPNType</key>
             <string>IKEv2</string>
+        </dict>
+        <dict>
+            <key>Password</key>
+            <string>${p12_pass}</string>
+            <key>PayloadCertificateFileName</key>
+            <string>${name}.p12</string>
+            <key>PayloadContent</key>
+            <data>${p12_b64}</data>
+            <key>PayloadDescription</key>
+            <string>Adds a PKCS#12-formatted certificate</string>
+            <key>PayloadDisplayName</key>
+            <string>${name}</string>
+            <key>PayloadIdentifier</key>
+            <string>com.ikev2vpn.cert.${cert_uuid}</string>
+            <key>PayloadType</key>
+            <string>com.apple.security.pkcs12</string>
+            <key>PayloadUUID</key>
+            <string>${cert_uuid}</string>
+            <key>PayloadVersion</key>
+            <integer>1</integer>
         </dict>
     </array>
     <key>PayloadDisplayName</key>

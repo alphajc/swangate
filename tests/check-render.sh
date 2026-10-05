@@ -425,12 +425,18 @@ for needle in (
     b"<key>IKEv2</key>",
     b"<string>Certificate</string>",
     b"<key>CertificateType</key>",
-    b"<string>ECDSA256</string>",
+    b"<string>RSA</string>",
+    b"<key>IKESecurityAssociationParameters</key>",
+    b"<key>ChildSecurityAssociationParameters</key>",
+    b"<key>ServerCertificateIssuerCommonName</key>",
+    b"<key>ServerCertificateCommonName</key>",
     b"<key>IPv6</key>",
     b"vpn.example.com",
 ):
     if needle not in data:
         raise SystemExit("missing %r" % needle)
+if b"<key>IKESAParameters</key>" in data or b"<key>ChildSAParameters</key>" in data:
+    raise SystemExit("legacy SA parameter key names must not be used")
 PY
 expect_fail "duplicate issue" cmd_issue alice
 cmd_revoke alice >/dev/null
@@ -449,10 +455,12 @@ grep -Eq 'bob +valid' <<<"$status_out" || fail "status shows bob"
 ok
 
 # Apple profile XML before signing.
-expect_eq "apple ecdsa type" "$(apple_certificate_type "$SERVER_CRT")" ECDSA256
+expect_eq "apple client cert type" "$(apple_certificate_type "${VPN_CLIENTS_DIR}/alice/alice.crt")" RSA
+expect_eq "apple server ecdsa type" "$(apple_certificate_type "$SERVER_CRT")" ECDSA256
+expect_eq "server subject cn" "$(cert_common_name "$SERVER_CRT" subject)" "$VPN_DOMAIN"
 write_mobileconfig_xml "${tmp}/p.mobileconfig" alice "$VPN_DOMAIN" pass "QUJD" \
   11111111-1111-1111-1111-111111111111 22222222-2222-2222-2222-222222222222 33333333-3333-3333-3333-333333333333 \
-  ECDSA256
+  RSA "Fake LE Intermediate" "$VPN_DOMAIN"
 python3 - "${tmp}/p.mobileconfig" <<'PY' || fail "profile xml"
 import sys
 import xml.etree.ElementTree as ET
@@ -462,8 +470,24 @@ if text.count("<integer>1</integer>") != text.count("<key>PayloadVersion</key>")
     raise SystemExit("boolean fields must use true/false tags")
 if "<integer>0</integer>" in text:
     raise SystemExit("boolean fields must use true/false tags")
-if "<key>CertificateType</key>" not in text or "<string>ECDSA256</string>" not in text:
-    raise SystemExit("missing CertificateType")
+for needle in (
+    "<key>CertificateType</key>",
+    "<string>RSA</string>",
+    "<key>IKESecurityAssociationParameters</key>",
+    "<key>ChildSecurityAssociationParameters</key>",
+    "<key>ServerCertificateIssuerCommonName</key>",
+    "<string>Fake LE Intermediate</string>",
+    "<key>ServerCertificateCommonName</key>",
+    "<key>UseConfigurationAttributeInternalIPSubnet</key>",
+    "<key>Proxies</key>",
+    "<key>OnDemandEnabled</key>",
+    "<key>DisableRedirect</key>",
+    "<true/>",
+):
+    if needle not in text:
+        raise SystemExit("missing %r" % needle)
+if "<key>IKESAParameters</key>" in text or "<key>ChildSAParameters</key>" in text:
+    raise SystemExit("legacy SA parameter key names must not be used")
 PY
 
 # get.sh installs from a tarball and runs the subcommand.
