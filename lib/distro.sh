@@ -512,12 +512,15 @@ select_backend() {
   log "Using the ${VPN_BACKEND} backend through service ${VPN_SERVICE}."
 }
 
-# Some cloud images disable ESP with "install esp4 /bin/false". Warn instead of failing quietly.
-warn_blocked_esp_modules() {
+ESP_MODPROBE_OVERRIDE="${IKEV2_ESP_MODPROBE_OVERRIDE:-/etc/modprobe.d/00-ikev2-vpn-esp.conf}"
+
+# Prints "module file" for each esp4/esp6 that a modprobe.d file disables with
+# "install espN /bin/false", which some cloud images ship.
+blocked_esp_modules() {
   local dir conf mod
   local -a dirs=(/etc/modprobe.d /run/modprobe.d /usr/local/lib/modprobe.d /usr/lib/modprobe.d /lib/modprobe.d)
   local install_re='^[[:space:]]*install[[:space:]]+'
-  local false_re='/(usr/)?bin/false([[:space:]]|$)'
+  local false_re='/(usr/)?bin/(false|true)([[:space:]]|$)'
   if [[ -n "${IKEV2_MODPROBE_DIRS:-}" ]]; then
     read -r -a dirs <<<"$IKEV2_MODPROBE_DIRS"
   fi
@@ -527,26 +530,78 @@ warn_blocked_esp_modules() {
       [[ -f "$conf" ]] || continue
       for mod in esp4 esp6; do
         if grep -Eq "${install_re}${mod}[[:space:]]+${false_re}" "$conf"; then
-          warn "Kernel module ${mod} is disabled in ${conf}. IPsec data packets will fail until that line is removed."
+          printf '%s %s\n' "$mod" "$conf"
         fi
       done
     done
   done
 }
 
+esp_modprobe_override() {
+  local modprobe_bin="$1"
+  printf '# %s\n' "$MANAGED_MARK"
+  # shellcheck disable=SC2016  # $CMDLINE_OPTS is expanded by modprobe.
+  printf 'install %s %s --ignore-install %s $CMDLINE_OPTS\n' esp4 "$modprobe_bin" esp4 esp6 "$modprobe_bin" esp6
+}
+
+# libkmod uses the first install command it reads for a module, and reads
+# modprobe.d files sorted by name, so the override must sort before the
+# image's own file.
+unblock_esp_modules() {
+  local blocked mod conf modprobe_bin
+  blocked="$(blocked_esp_modules)"
+  [[ -n "$blocked" ]] || return 0
+  while read -r mod conf; do
+    [[ "$conf" == "$ESP_MODPROBE_OVERRIDE" ]] && continue
+    warn "Kernel module ${mod} is disabled in ${conf}. Overriding it in ${ESP_MODPROBE_OVERRIDE}."
+  done <<<"$blocked"
+  modprobe_bin="$(command -v modprobe 2>/dev/null || printf '/sbin/modprobe')"
+  mkdir -p "$(dirname "$ESP_MODPROBE_OVERRIDE")"
+  esp_modprobe_override "$modprobe_bin" >"$ESP_MODPROBE_OVERRIDE"
+  chmod 644 "$ESP_MODPROBE_OVERRIDE"
+}
+
+kernel_module_list() {
+  printf '%s\n' esp4 esp6 xfrm_user xfrm_algo xfrm4_tunnel xfrm6_tunnel af_key authenc echainiv seqiv \
+    cryptd hmac aes aes_generic sha256 sha256_generic sha512 gcm cbc tun \
+    ip6table_nat iptable_nat nf_nat ip6table_mangle iptable_mangle xt_policy xt_TCPMSS \
+    nf_conntrack xt_conntrack tcp_bbr
+}
+
+# Packages that carry ESP and crypto modules some cloud kernels leave out.
+kernel_extra_packages() {
+  local release
+  release="$(uname -r)"
+  case "$DISTRO_FAMILY" in
+    debian) printf '%s\n' "linux-modules-extra-${release}" ;;
+    rhel) printf '%s\n' "kernel-modules-extra-${release}" kernel-modules-extra ;;
+    suse) printf '%s\n' kernel-default-extra ;;
+  esac
+}
+
+install_kernel_extra_modules() {
+  local pkg
+  for pkg in $(kernel_extra_packages); do
+    if pkg_available "$pkg"; then
+      pkg_install "$pkg" && return 0
+    fi
+  done
+  return 1
+}
+
 load_kernel_modules() {
-  local -a modules=(esp4 esp6 xfrm_user xfrm_algo af_key authenc cryptd aes sha256 sha512 gcm cbc tun
-    ip6table_nat iptable_nat nf_nat ip6table_mangle iptable_mangle xt_policy xt_TCPMSS
-    nf_conntrack xt_conntrack tcp_bbr)
-  local -a loaded=()
+  local -a modules=() loaded=()
   local mod
-  warn_blocked_esp_modules
+  mapfile -t modules < <(kernel_module_list)
+  unblock_esp_modules
   if ! have_cmd modprobe; then
     warn "modprobe is not available. Skipping kernel module loading."
     return 0
   fi
   for mod in "${modules[@]}"; do
     if modprobe "$mod" 2>/dev/null; then
+      loaded+=("$mod")
+    elif [[ "$mod" == esp4 || "$mod" == esp6 ]] && modprobe --ignore-install "$mod" 2>/dev/null; then
       loaded+=("$mod")
     fi
   done
@@ -568,9 +623,10 @@ kernel_xfrm_probe() {
   have_cmd ip || return 1
   key="$(openssl rand -hex 32)"
   spi="0x$(openssl rand -hex 4)"
-  ip xfrm state add src 192.0.2.1 dst 192.0.2.2 proto esp spi "$spi" reqid 4242 mode tunnel \
+  # IPv6 outer addresses, so the probe also needs esp6: the VPN runs over IPv6.
+  ip xfrm state add src 2001:db8::1 dst 2001:db8::2 proto esp spi "$spi" reqid 4242 mode tunnel \
     enc 'cbc(aes)' "0x${key}" auth-trunc 'hmac(sha256)' "0x${key}" 128 >/dev/null 2>&1 || return 1
-  ip xfrm state delete src 192.0.2.1 dst 192.0.2.2 proto esp spi "$spi" >/dev/null 2>&1 || true
+  ip xfrm state delete src 2001:db8::1 dst 2001:db8::2 proto esp spi "$spi" >/dev/null 2>&1 || true
   return 0
 }
 
@@ -618,6 +674,186 @@ select_dataplane() {
   else
     log "Using kernel IPsec (XFRM)."
   fi
+}
+
+# Loads the ESP and crypto modules, and installs the distribution's extra
+# kernel modules package when the running kernel still cannot do
+# AES-CBC + HMAC-SHA256 ESP. $1 is the requested dataplane.
+prepare_kernel_dataplane() {
+  local want="${1:-auto}"
+  load_kernel_modules
+  [[ "$want" == "libipsec" ]] && return 0
+  kernel_has_cbc_hmac && return 0
+  log "The kernel cannot do AES-CBC with HMAC-SHA256 for ESP yet. Trying the extra kernel modules package."
+  if install_kernel_extra_modules; then
+    load_kernel_modules
+  fi
+}
+
+STRONGSWAN_SRC_VERSION="5.9.14"
+STRONGSWAN_SRC_SHA256="728027ddda4cb34c67c4cec97d3ddb8c274edfbabdaeecf7e74693b54fc33678"
+STRONGSWAN_SRC_URL="${IKEV2_STRONGSWAN_SRC_URL:-https://download.strongswan.org/strongswan-${STRONGSWAN_SRC_VERSION}.tar.bz2}"
+# kernel-libipsec gained raw (non-UDP-encapsulated) ESP in this release.
+STRONGSWAN_RAW_ESP_VERSION="5.9.11"
+
+# True when version $1 is at least $2.
+version_ge() {
+  [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n 1)" == "$2" ]]
+}
+
+# Prints the installed StrongSwan version, for example 5.9.8, or nothing.
+strongswan_version() {
+  local out="" cmd
+  if [[ -n "${IKEV2_STRONGSWAN_VERSION:-}" ]]; then
+    printf '%s\n' "$IKEV2_STRONGSWAN_VERSION"
+    return 0
+  fi
+  if have_cmd swanctl; then
+    out="$(swanctl --version 2>/dev/null || true)"
+  fi
+  if [[ -z "$out" ]]; then
+    cmd="$(ipsec_command)"
+    [[ -n "$cmd" ]] && out="$("$cmd" --version 2>/dev/null || true)"
+  fi
+  if [[ -z "$out" ]] && have_cmd dpkg-query; then
+    out="$(dpkg-query -W -f='${Version}\n' strongswan 2>/dev/null || true)"
+  fi
+  if [[ -z "$out" ]] && have_cmd rpm; then
+    out="$(rpm -q --qf '%{VERSION}\n' strongswan 2>/dev/null || true)"
+  fi
+  grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' <<<"$out" | head -n 1 || true
+}
+
+strongswan_has_raw_esp() {
+  local version="${1:-}"
+  [[ -n "$version" ]] && version_ge "$version" "$STRONGSWAN_RAW_ESP_VERSION"
+}
+
+strongswan_build_packages() {
+  case "$DISTRO_FAMILY" in
+    debian)
+      printf '%s\n' build-essential pkg-config bison flex bzip2 curl \
+        libssl-dev libgmp-dev libsystemd-dev
+      ;;
+  esac
+}
+
+# Debian-family layout: binaries in /usr/sbin, charon and plugins in
+# /usr/lib/ipsec, config in /etc. Matching it lets the distribution's
+# strongswan-starter and strongswan (charon-systemd) units keep working, so
+# upstream's units go to the throwaway directory $1.
+strongswan_configure_args() {
+  local unit_dir="$1"
+  printf '%s\n' --prefix=/usr --sysconfdir=/etc --libexecdir=/usr/lib --libdir=/usr/lib \
+    --with-ipsecdir=/usr/lib/ipsec "--with-systemdsystemunitdir=${unit_dir}" \
+    --enable-openssl --enable-gmp --enable-kernel-netlink --enable-kernel-libipsec \
+    --enable-socket-default --enable-stroke --enable-swanctl --enable-vici --enable-systemd \
+    --enable-attr --enable-resolve --enable-updown --enable-revocation --enable-constraints \
+    --enable-pkcs1 --enable-pkcs8 --enable-pkcs12 --enable-pem --enable-x509 --enable-pubkey
+}
+
+STRONGSWAN_PLUGIN_DIR="${IKEV2_STRONGSWAN_PLUGIN_DIR:-/usr/lib/ipsec/plugins}"
+
+# Plugins left from the packaged release would be loaded into the newer
+# daemon with a mismatched ABI, so move them aside before installing.
+stash_packaged_plugins() {
+  local dest
+  [[ -d "$STRONGSWAN_PLUGIN_DIR" ]] || return 0
+  dest="${STATE_DIR}/packaged-plugins.$(date +%Y%m%d%H%M%S)"
+  mkdir -p "$STATE_DIR"
+  mv "$STRONGSWAN_PLUGIN_DIR" "$dest"
+  log "Moved the packaged StrongSwan plugins to ${dest}."
+}
+
+# Debian confines charon with AppArmor; raw ESP needs a raw socket.
+allow_charon_raw_socket() {
+  local dir="${IKEV2_APPARMOR_DIR:-/etc/apparmor.d}"
+  local profile="${dir}/usr.lib.ipsec.charon"
+  local local_rules="${dir}/local/usr.lib.ipsec.charon"
+  [[ -f "$profile" ]] || return 0
+  mkdir -p "$(dirname "$local_rules")"
+  touch "$local_rules"
+  if ! grep -q 'ikev2-vpn raw ESP' "$local_rules"; then
+    printf '%s\n' '# ikev2-vpn raw ESP for kernel-libipsec' 'capability net_raw,' 'network inet6 raw,' \
+      'network inet raw,' >>"$local_rules"
+  fi
+  if have_cmd apparmor_parser && [[ -d /sys/kernel/security/apparmor ]]; then
+    apparmor_parser -r "$profile" >/dev/null 2>&1 || warn "Could not reload the AppArmor profile ${profile}."
+  fi
+}
+
+# Keeps apt from replacing the source-built daemon with the older package.
+hold_strongswan_packages() {
+  local -a pkgs=()
+  have_cmd dpkg-query && have_cmd apt-mark || return 0
+  mapfile -t pkgs < <(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' \
+    'strongswan*' 'libstrongswan*' 'libcharon*' 'charon*' 2>/dev/null | awk '$1 ~ /^.i/ {print $2}')
+  [[ ${#pkgs[@]} -gt 0 ]] || return 0
+  apt-mark hold "${pkgs[@]}" >/dev/null
+  log "Held packages so upgrades keep StrongSwan ${STRONGSWAN_SRC_VERSION}: ${pkgs[*]}"
+}
+
+build_strongswan_from_source() {
+  local work src jobs
+  local -a args=()
+  [[ "$DISTRO_FAMILY" == "debian" ]] \
+    || die "StrongSwan $(strongswan_version) cannot receive raw ESP with kernel-libipsec, and building ${STRONGSWAN_SRC_VERSION} from source is only supported on Debian and Ubuntu. Install StrongSwan ${STRONGSWAN_RAW_ESP_VERSION} or newer, or a kernel with AES-CBC and HMAC-SHA256."
+  log "Building StrongSwan ${STRONGSWAN_SRC_VERSION} from source for raw ESP in kernel-libipsec."
+  pkg_refresh
+  # shellcheck disable=SC2046
+  pkg_install $(strongswan_build_packages) || die "Failed to install StrongSwan build dependencies."
+  work="$(mktemp -d)"
+  src="${work}/strongswan-${STRONGSWAN_SRC_VERSION}"
+  if ! curl -fsSL --retry 3 -o "${work}/strongswan.tar.bz2" "$STRONGSWAN_SRC_URL"; then
+    rm -rf "$work"
+    die "Could not download ${STRONGSWAN_SRC_URL}."
+  fi
+  if ! sha256sum "${work}/strongswan.tar.bz2" | grep -q "^${STRONGSWAN_SRC_SHA256} "; then
+    rm -rf "$work"
+    die "Checksum mismatch for ${STRONGSWAN_SRC_URL}."
+  fi
+  tar -xjf "${work}/strongswan.tar.bz2" -C "$work" || { rm -rf "$work"; die "Could not unpack the StrongSwan source."; }
+  mapfile -t args < <(strongswan_configure_args "${work}/systemd-units")
+  jobs="$(nproc 2>/dev/null || printf '1')"
+  if ! (cd "$src" && ./configure "${args[@]}" >"${work}/configure.log" 2>&1 \
+    && make -j"$jobs" >"${work}/make.log" 2>&1); then
+    mkdir -p "$STATE_DIR"
+    cp "${work}"/*.log "$STATE_DIR"/ 2>/dev/null || true
+    rm -rf "$work"
+    die "Building StrongSwan ${STRONGSWAN_SRC_VERSION} failed. Logs are in ${STATE_DIR}."
+  fi
+  stash_packaged_plugins
+  if ! (cd "$src" && make install >"${work}/install.log" 2>&1); then
+    mkdir -p "$STATE_DIR"
+    cp "${work}"/*.log "$STATE_DIR"/ 2>/dev/null || true
+    rm -rf "$work"
+    die "Building StrongSwan ${STRONGSWAN_SRC_VERSION} failed. Logs are in ${STATE_DIR}."
+  fi
+  rm -rf "$work"
+  have_cmd ldconfig && ldconfig
+  hold_strongswan_packages
+  mkdir -p "$STATE_DIR"
+  printf '%s\n' "$STRONGSWAN_SRC_VERSION" >"${STATE_DIR}/strongswan-source-version"
+  log "Installed StrongSwan ${STRONGSWAN_SRC_VERSION}."
+}
+
+# Android's built-in VPN sends plain ESP over IPv6. kernel-libipsec needs
+# StrongSwan 5.9.11 or newer to receive it.
+ensure_libipsec_raw_esp() {
+  local version
+  [[ "$VPN_DATAPLANE" == "libipsec" ]] || return 0
+  allow_charon_raw_socket
+  version="$(strongswan_version)"
+  if strongswan_has_raw_esp "$version"; then
+    log "StrongSwan ${version} supports raw ESP in kernel-libipsec."
+    return 0
+  fi
+  warn "StrongSwan ${version:-unknown} predates ${STRONGSWAN_RAW_ESP_VERSION}; kernel-libipsec cannot receive the plain ESP that Android's built-in VPN sends."
+  if [[ "${IKEV2_SKIP_SWAN_BUILD:-0}" == "1" ]]; then
+    warn "IKEV2_SKIP_SWAN_BUILD=1: not building StrongSwan ${STRONGSWAN_SRC_VERSION}."
+    return 0
+  fi
+  build_strongswan_from_source
 }
 
 # Package-owned plugin files stay untouched; this file sorts after them and wins.

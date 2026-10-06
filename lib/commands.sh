@@ -55,7 +55,10 @@ Options:
   --clients-dir PATH     Where client files are written (default: /root/vpn-clients)
   --backend NAME         auto, ipsec, or swanctl (default: auto)
   --firewall NAME        auto, firewalld, iptables, or nftables (default: auto)
-  --dataplane NAME       auto, kernel, or libipsec (default: auto)
+  --dataplane NAME       auto, kernel, or libipsec (default: auto). auto
+                         unblocks esp4/esp6 and prefers kernel XFRM; with
+                         libipsec and StrongSwan older than 5.9.11 it builds
+                         StrongSwan 5.9.14 from source (Debian/Ubuntu)
   --key-type TYPE        Server and client key type: rsa or ecdsa
                          (default: the existing certificate's type, else
                          rsa). rsa works on iOS, macOS, Windows, and the
@@ -541,8 +544,10 @@ cmd_install() {
   install_packages "$need_fw"
   select_backend "$backend_arg"
   select_firewall "$firewall_arg"
-  load_kernel_modules
+  prepare_kernel_dataplane "$dataplane_arg"
   select_dataplane "$dataplane_arg"
+  VPN_DATAPLANE_REQUEST="$dataplane_arg"
+  ensure_libipsec_raw_esp
   [[ "$need_cert" -eq 1 ]] && resolve_certbot
 
   VPN_DISTRO_FAMILY="$DISTRO_FAMILY"
@@ -586,7 +591,7 @@ IKEv2 VPN is installed.
   Domain:          ${VPN_DOMAIN}
   IPv6:            ${VPN_IPV6}
   Interface:       ${VPN_INTERFACE}
-  StrongSwan:      ${VPN_BACKEND} (${VPN_SERVICE})
+  StrongSwan:      ${VPN_BACKEND} (${VPN_SERVICE}) $(strongswan_version)
   Dataplane:       ${VPN_DATAPLANE}
   Firewall:        ${VPN_FIREWALL}
   Key type:        ${VPN_CERT_KEY_TYPE}
@@ -829,6 +834,15 @@ cmd_status() {
     ipsec) sas="$("$(ipsec_command)" status 2>/dev/null | grep -c 'ESTABLISHED' || true)" ;;
   esac
   [[ -f "$CRL_PATH" ]] && crl="$CRL_PATH"
+  local swan_version raw_esp=""
+  swan_version="$(strongswan_version)"
+  if [[ "$VPN_DATAPLANE" == "libipsec" ]]; then
+    if strongswan_has_raw_esp "$swan_version"; then
+      raw_esp=$'\n'"  Raw ESP:         yes (Android built-in VPN works)"
+    else
+      raw_esp=$'\n'"  Raw ESP:         no (needs StrongSwan ${STRONGSWAN_RAW_ESP_VERSION}+; run 'sudo swangate update')"
+    fi
+  fi
 
   cat <<EOF
 IKEv2 VPN status
@@ -837,10 +851,11 @@ IKEv2 VPN status
   IPv6:            ${VPN_IPV6}
   Interface:       ${VPN_INTERFACE}
   StrongSwan:      ${VPN_BACKEND} (${VPN_SERVICE:-unknown}) ${active}
+  Version:         ${swan_version:-unknown}
   Connection:      ikev2-cert ${loaded}
   Server key:      ${key_type}
   Server cert:     expires ${expiry}
-  Dataplane:       ${VPN_DATAPLANE}
+  Dataplane:       ${VPN_DATAPLANE}${raw_esp}
   Firewall:        ${VPN_FIREWALL}
   Established SAs: ${sas}
   CRL:             ${crl}
@@ -902,6 +917,18 @@ reissue_valid_clients() {
     log "No valid client certificates to re-issue."
   else
     log "Re-issued ${count} client profile(s)."
+  fi
+}
+
+# Configs from before VPN_DATAPLANE_REQUEST only kept the selected dataplane.
+# A saved libipsec may just be a failed kernel probe, so probe again.
+update_dataplane_arg() {
+  if [[ -n "${VPN_DATAPLANE_REQUEST:-}" ]]; then
+    printf '%s\n' "$VPN_DATAPLANE_REQUEST"
+  elif [[ "$VPN_DATAPLANE" == "libipsec" ]]; then
+    printf 'auto\n'
+  else
+    printf '%s\n' "$VPN_DATAPLANE"
   fi
 }
 
@@ -969,7 +996,7 @@ cmd_update() {
     --clients-dir "$VPN_CLIENTS_DIR"
     --backend "$VPN_BACKEND"
     --firewall "$VPN_FIREWALL"
-    --dataplane "$VPN_DATAPLANE"
+    --dataplane "$(update_dataplane_arg)"
     --skip-certbot
   )
   [[ -n "${VPN_CERT_KEY_TYPE:-}" ]] && install_args+=(--key-type "$VPN_CERT_KEY_TYPE")

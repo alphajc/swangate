@@ -74,7 +74,7 @@ curl -fsSL https://raw.githubusercontent.com/alphajc/swangate/main/get.sh | sudo
 | `--clients-dir` | `/root/vpn-clients` | 客户端文件目录 |
 | `--backend` | `auto` | `ipsec`（ipsec.conf）或 `swanctl` |
 | `--firewall` | `auto` | `firewalld`、`iptables` 或 `nftables` |
-| `--dataplane` | `auto` | `kernel` 或 `libipsec` |
+| `--dataplane` | `auto` | `kernel` 或 `libipsec`。`auto` 优先内核，见「数据通道」 |
 | `--key-type` | 现有证书的类型，没有证书时 `rsa` | 服务器和客户端证书的密钥类型。`rsa` 是 iOS、macOS、Windows 和 Android 都能用的默认值 |
 
 也可以用环境变量传参，例如 `VPN_DOMAIN`、`VPN_IPV6`、`VPN_EMAIL`。
@@ -99,7 +99,8 @@ NixOS、Gentoo、Void 以及其他系统不支持，安装程序会在改动任�
 
 - **StrongSwan**：有 `strongswan-starter` 就写 `ipsec.conf`；只有 swanctl（如 Fedora、Arch）就写 `swanctl/conf.d/ikev2-vpn.conf`。两套服务都在时只启用一套。
 - **防火墙**：正在运行的 firewalld 优先；否则用 iptables；再否则用 nftables。iptables 和 nftables 规则会在开机时自动恢复。
-- **数据通道**：iOS 只用 AES-CBC + SHA2-256 建立数据通道。内核不支持这组算法时（会报 `Requested type not found`），自动改用 StrongSwan 的用户态 `kernel-libipsec`。子 SA 优先协商带 DH14 的 PFS，并保留不含 DH 的算法给旧客户端。`kernel-libipsec` 从 StrongSwan 5.9.11 起才能收发不封装的 ESP，更旧的版本接不了 Android 系统自带 VPN。
+- **数据通道**：iOS 只用 AES-CBC + SHA2-256 建立数据通道，安装程序优先用内核 IPsec（XFRM）。部分云镜像用 `install esp4 /bin/false` 之类的 modprobe 配置禁掉 ESP 模块；安装程序会写 `/etc/modprobe.d/00-ikev2-vpn-esp.conf` 解除，再加载 ESP 和加密模块，用 IPv6 SA 实测内核能否做这组算法。还不行时尝试装发行版的额外内核模块包（Ubuntu 的 `linux-modules-extra-$(uname -r)`、RHEL 系的 `kernel-modules-extra`）。最后才改用 StrongSwan 的用户态 `kernel-libipsec`。子 SA 优先协商带 DH14 的 PFS，并保留不含 DH 的算法给旧客户端。
+- **用户态数据通道与 Android**：`kernel-libipsec` 从 StrongSwan 5.9.11 起才能收发不封装的 ESP（`raw_esp`），Android 系统自带 VPN 在 IPv6 上只发这种包。落到 `kernel-libipsec` 并且已装的 StrongSwan 低于 5.9.11（例如 Debian 12 的 5.9.8）时，安装程序在 Debian / Ubuntu 上从官方源码编译 StrongSwan 5.9.14（校验 SHA256），装到与发行版包相同的路径，沿用原来的 systemd 服务，并 `apt-mark hold` 住 StrongSwan 相关包，避免升级时被换回旧版。原来的插件目录挪到 `/var/lib/ikev2-vpn/packaged-plugins.*`。其他发行版遇到这种情况会直接报错退出。
 - **内核参数**：写入 `/etc/sysctl.d/99-ikev2-vpn.conf`，打开转发，关闭反向路径过滤和 ICMP 重定向，避免 IPsec 流量被丢掉。内核支持时启用 BBR，并加大连接跟踪表和 UDP 超时，减少 NAT-T 映射过期。思路参考 [setup-ipsec-vpn](https://github.com/hwdsl2/setup-ipsec-vpn)，不包含它的 L2TP 和 Libreswan。
 
 ## 云主机安全组
@@ -156,7 +157,15 @@ Let's Encrypt 会顺着域名的 AAAA 记录访问 80/tcp。域名如果同时�
 另外两件事先确认：
 
 - 云安全组放行了 IPv6 的 ESP（IP 协议 50）。系统 VPN 走 IPv6 时不把 ESP 封装进 UDP。
-- 数据通道是 `kernel`，或者是 StrongSwan 5.9.11 及以上的 `libipsec`（`sudo swangate status` 里的 `Dataplane`）。
+- 数据通道是 `kernel`，或者是 StrongSwan 5.9.11 及以上的 `libipsec`。看 `sudo swangate status` 里的 `Dataplane`、`Version` 和 `Raw ESP` 三行。
+
+能连上但上不了网，在服务器上执行 `sudo tcpdump -n -i any ip6 proto 50` 却看不到 ESP，或者 `Raw ESP` 显示 `no` 时，用新版本重新应用一次配置。它会再探测一遍内核，必要时编译新版 StrongSwan：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alphajc/swangate/main/get.sh | sudo bash -s -- update
+```
+
+安装时显式传过 `--dataplane libipsec` 的话，`update` 会照旧使用 `libipsec`；想让它重新探测，执行 `sudo swangate install --dataplane auto --skip-certbot`（加上原来的参数）。
 
 把 `alice.p12` 和 `server-ca.crt` 拷到手机上。口令在 `connection.txt` 的 `PKCS#12 password` 一行，只在导入证书时用；VPN 本身没有账号密码。
 
