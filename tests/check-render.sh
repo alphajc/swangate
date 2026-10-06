@@ -340,7 +340,7 @@ expect_eq "version override" "$(IKEV2_STRONGSWAN_VERSION=5.9.8 strongswan_versio
 expect_eq "swanctl version" "$(
   IKEV2_STRONGSWAN_VERSION=""
   have_cmd() { [[ "$1" == swanctl ]]; }
-  swanctl() { printf 'strongSwan swanctl 5.9.8\n'; }
+  swanctl() { printf "connecting to 'unix:///var/run/charon.vici' failed\n" >&2; printf 'strongSwan 5.9.8 swanctl\n' >&2; }
   strongswan_version
 )" 5.9.8
 expect_eq "ipsec version" "$(

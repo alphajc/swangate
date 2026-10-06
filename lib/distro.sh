@@ -708,12 +708,12 @@ strongswan_version() {
     printf '%s\n' "$IKEV2_STRONGSWAN_VERSION"
     return 0
   fi
-  if have_cmd swanctl; then
-    out="$(swanctl --version 2>/dev/null || true)"
-  fi
-  if [[ -z "$out" ]]; then
-    cmd="$(ipsec_command)"
-    [[ -n "$cmd" ]] && out="$("$cmd" --version 2>/dev/null || true)"
+  cmd="$(ipsec_command)"
+  [[ -n "$cmd" ]] && out="$("$cmd" --version 2>/dev/null || true)"
+  # swanctl prints its own version on stderr when no daemon is reachable, and
+  # can add the running daemon's version, which lags behind after an upgrade.
+  if [[ -z "$out" ]] && have_cmd swanctl; then
+    out="$(swanctl --version 2>&1 | grep -E 'strongSwan.*swanctl|swanctl.*strongSwan' || true)"
   fi
   if [[ -z "$out" ]] && have_cmd dpkg-query; then
     out="$(dpkg-query -W -f='${Version}\n' strongswan 2>/dev/null || true)"
@@ -749,7 +749,8 @@ strongswan_configure_args() {
     --enable-openssl --enable-gmp --enable-kernel-netlink --enable-kernel-libipsec \
     --enable-socket-default --enable-stroke --enable-swanctl --enable-vici --enable-systemd \
     --enable-attr --enable-resolve --enable-updown --enable-revocation --enable-constraints \
-    --enable-pkcs1 --enable-pkcs8 --enable-pkcs12 --enable-pem --enable-x509 --enable-pubkey
+    --enable-pkcs1 --enable-pkcs8 --enable-pkcs12 --enable-pem --enable-x509 --enable-pubkey \
+    --enable-aesni --enable-ctr --enable-ccm --enable-chapoly --enable-eap-identity
 }
 
 STRONGSWAN_PLUGIN_DIR="${IKEV2_STRONGSWAN_PLUGIN_DIR:-/usr/lib/ipsec/plugins}"
