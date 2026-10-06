@@ -56,13 +56,17 @@ Options:
   --backend NAME         auto, ipsec, or swanctl (default: auto)
   --firewall NAME        auto, firewalld, iptables, or nftables (default: auto)
   --dataplane NAME       auto, kernel, or libipsec (default: auto)
+  --key-type TYPE        Server and client key type: rsa or ecdsa
+                         (default: the existing certificate's type, else
+                         rsa). rsa works on iOS, macOS, Windows, and the
+                         Android built-in VPN.
   --staging              Use the Let's Encrypt staging server
   --skip-certbot         Do not run certbot; reuse an existing certificate
   -h, --help             Show this help
 
 Environment variables (flags override them):
   VPN_DOMAIN VPN_IPV6 VPN_EMAIL VPN_INTERFACE VPN_CA_COUNTRY VPN_CA_ORG
-  VPN_POOL_V4 VPN_POOL_V6 VPN_DNS VPN_CLIENTS_DIR
+  VPN_POOL_V4 VPN_POOL_V6 VPN_DNS VPN_CLIENTS_DIR VPN_CERT_KEY_TYPE
 EOF
 }
 
@@ -87,6 +91,7 @@ Usage: swangate issue [--force] NAME
 
 Issue a client certificate signed by the local VPN CA and write:
   NAME.crt NAME.key NAME.p12 NAME.mobileconfig ca.crt connection.txt
+  server-ca.crt (RSA servers: the CA Android uses to verify the server)
 
 The PKCS#12 password is random and is printed here. It is also embedded
 in the Apple profile so iOS and macOS can import it.
@@ -321,9 +326,17 @@ EOF
   chmod 755 "$RENEW_HOOK"
 }
 
+# Prints ecdsa or rsa for the existing Let's Encrypt key, or nothing.
+live_cert_key_type() {
+  local key="${LETSENCRYPT_DIR}/live/${VPN_DOMAIN}/privkey.pem"
+  [[ -f "$key" ]] || return 0
+  detect_key_type "$key" | tr '[:upper:]' '[:lower:]'
+}
+
 server_cert_is_current() {
   local live="${LETSENCRYPT_DIR}/live/${VPN_DOMAIN}"
   [[ -f "${live}/cert.pem" && -f "${live}/privkey.pem" && -f "${live}/chain.pem" ]] || return 1
+  [[ "$(live_cert_key_type)" == "$VPN_CERT_KEY_TYPE" ]] || return 1
   openssl x509 -in "${live}/cert.pem" -noout -checkend 2592000 >/dev/null 2>&1
 }
 
@@ -349,10 +362,19 @@ run_certbot() {
     && ! openssl x509 -in "$live" -noout -issuer | grep -qi staging; then
     die "A production certificate already exists. Refusing --staging."
   fi
+  # --cert-name together with --key-type lets certbot replace an existing
+  # lineage of the other key type instead of refusing non-interactively.
   args=("$CERTBOT_BIN" certonly --standalone --non-interactive --agree-tos
-    --preferred-challenges http --domain "$VPN_DOMAIN" --keep-until-expiring)
+    --preferred-challenges http --domain "$VPN_DOMAIN" --cert-name "$VPN_DOMAIN"
+    --keep-until-expiring)
   if "$CERTBOT_BIN" --help all 2>/dev/null | grep -q -- '--key-type'; then
-    args+=(--key-type ecdsa --elliptic-curve secp256r1)
+    if [[ "$VPN_CERT_KEY_TYPE" == "rsa" ]]; then
+      args+=(--key-type rsa --rsa-key-size 2048)
+    else
+      args+=(--key-type ecdsa --elliptic-curve secp256r1)
+    fi
+  elif [[ "$VPN_CERT_KEY_TYPE" == "ecdsa" ]]; then
+    warn "This certbot cannot request ECDSA keys. The server certificate will be RSA."
   fi
   [[ "$VPN_CERTBOT_STAGING" == "1" ]] && args+=(--staging)
   if [[ -n "$VPN_EMAIL" ]]; then
@@ -386,6 +408,7 @@ cmd_install() {
   VPN_CLIENTS_DIR="${VPN_CLIENTS_DIR:-/root/vpn-clients}"
   VPN_CERTBOT_STAGING="${VPN_CERTBOT_STAGING:-0}"
   VPN_SKIP_CERTBOT="${VPN_SKIP_CERTBOT:-0}"
+  VPN_CERT_KEY_TYPE="${VPN_CERT_KEY_TYPE:-}"
 
   while [[ $# -gt 0 ]]; do
     opt="${1%%=*}"
@@ -408,7 +431,7 @@ cmd_install() {
         shift
         continue
         ;;
-      --domain|--ipv6|--email|--interface|--ca-country|--ca-org|--pool-v4|--pool-v6|--dns|--clients-dir|--backend|--firewall|--dataplane)
+      --domain|--ipv6|--email|--interface|--ca-country|--ca-org|--pool-v4|--pool-v6|--dns|--clients-dir|--backend|--firewall|--dataplane|--key-type)
         take_value "$opt" "$inline" "${2-}" "$has_next"
         ;;
       *)
@@ -429,6 +452,7 @@ cmd_install() {
       --backend) backend_arg="$OPT_VALUE" ;;
       --firewall) firewall_arg="$OPT_VALUE" ;;
       --dataplane) dataplane_arg="$OPT_VALUE" ;;
+      --key-type) VPN_CERT_KEY_TYPE="$OPT_VALUE" ;;
     esac
     shift "$OPT_SHIFT"
   done
@@ -444,6 +468,7 @@ cmd_install() {
   case "$backend_arg" in auto|ipsec|swanctl) ;; *) die "Unknown --backend: ${backend_arg}" ;; esac
   case "$firewall_arg" in auto|firewalld|iptables|nftables) ;; *) die "Unknown --firewall: ${firewall_arg}" ;; esac
   case "$dataplane_arg" in auto|kernel|libipsec) ;; *) die "Unknown --dataplane: ${dataplane_arg}" ;; esac
+  case "$VPN_CERT_KEY_TYPE" in ""|ecdsa|rsa) ;; *) die "Unknown --key-type: ${VPN_CERT_KEY_TYPE}. Use ecdsa or rsa." ;; esac
 
   require_root
   detect_distro
@@ -485,9 +510,19 @@ cmd_install() {
   VPN_INTERFACE="$(find_ipv6_iface "$VPN_IPV6" "$VPN_INTERFACE")"
   log "Using outbound interface ${VPN_INTERFACE} for ${VPN_IPV6}."
 
+  local live_type=""
+  have_cmd openssl && live_type="$(live_cert_key_type)"
+  if [[ -z "$VPN_CERT_KEY_TYPE" ]]; then
+    VPN_CERT_KEY_TYPE="${live_type:-rsa}"
+  fi
+  log "Using ${VPN_CERT_KEY_TYPE} keys for the server and client certificates."
+
   need_cert=1
   if [[ "$VPN_SKIP_CERTBOT" == "1" ]]; then
     need_cert=0
+    if [[ -n "$live_type" && "$live_type" != "$VPN_CERT_KEY_TYPE" ]]; then
+      warn "The existing certificate uses ${live_type}, not ${VPN_CERT_KEY_TYPE}. Rerun without --skip-certbot to replace it."
+    fi
   elif have_cmd openssl && server_cert_is_current; then
     need_cert=0
     log "The Let's Encrypt certificate for ${VPN_DOMAIN} is valid for more than 30 days. Skipping certbot."
@@ -533,6 +568,7 @@ cmd_install() {
     run_certbot
   fi
   sync_server_cert
+  VPN_CERT_KEY_TYPE="$(tr '[:upper:]' '[:lower:]' <<<"$VPN_SERVER_KEY_TYPE")"
   write_swan_config
   publish_crl
   install_renew_hook
@@ -553,6 +589,7 @@ IKEv2 VPN is installed.
   StrongSwan:      ${VPN_BACKEND} (${VPN_SERVICE})
   Dataplane:       ${VPN_DATAPLANE}
   Firewall:        ${VPN_FIREWALL}
+  Key type:        ${VPN_CERT_KEY_TYPE}
   Client CA:       ${VPN_CA_SUBJECT}
   IPv4 pool:       ${VPN_POOL_V4}
   IPv6 pool:       ${VPN_POOL_V6}
@@ -593,6 +630,7 @@ cmd_issue() {
   local raw="${work_dir}/${name}.raw.mobileconfig"
   local profile="${work_dir}/${name}.mobileconfig"
   local ca_copy="${work_dir}/ca.crt"
+  local server_ca="${work_dir}/server-ca.crt"
   local note="${work_dir}/connection.txt"
   if [[ -f "$crt" ]]; then
     if [[ "$force" -ne 1 ]]; then
@@ -612,10 +650,13 @@ cmd_issue() {
   p12_pass="$(openssl rand -hex 12)"
   old_umask="$(umask)"
   umask 077
+  # Android's certificate installer rejects OpenSSL 3's default AES-256/PBKDF2
+  # PKCS#12 as a wrong password; 3DES with a SHA1 MAC imports everywhere.
   openssl pkcs12 -export \
     -inkey "$key" \
     -in "$crt" \
     -certfile "$CA_CRT_PATH" \
+    -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 \
     -out "$p12" \
     -name "$name" \
     -passout "pass:${p12_pass}"
@@ -671,6 +712,29 @@ cmd_issue() {
   chmod 600 "$profile"
   chmod 644 "$crt"
 
+  local android_note server_ca_cn="" server_ca_line=""
+  rm -f "$server_ca"
+  if [[ "$server_type" == "RSA" ]]; then
+    if server_issuer_pem "$SERVER_CRT" "$chain_src" >"$server_ca"; then
+      chmod 644 "$server_ca"
+      server_ca_cn="$(cert_common_name "$server_ca" subject)"
+    else
+      rm -f "$server_ca"
+      warn "Cannot find the issuer of the server certificate in ${chain_src}. Android must trust it to verify the server."
+    fi
+  fi
+  if [[ -n "$server_ca_cn" ]]; then
+    server_ca_line=$'\n'"  Server CA (Android): ${server_ca}"
+    android_note="Android: install ${name}.p12 as a VPN and app user certificate and server-ca.crt
+  (${server_ca_cn}) as a CA certificate, then add a VPN of type IKEv2/IPSec RSA:
+  server ${VPN_DOMAIN}, IPSec identifier ${name}, CA certificate ${server_ca_cn}."
+  elif [[ "$server_type" == "RSA" ]]; then
+    android_note="Android: add a VPN of type IKEv2/IPSec RSA with server ${VPN_DOMAIN} and IPSec identifier ${name}."
+  else
+    android_note="Android: the built-in VPN only signs with RSA. Reinstall the server with
+  --key-type rsa, then re-issue this client."
+  fi
+
   cat >"$note" <<EOF
 IKEv2 client ${name}
 Server: ${VPN_DOMAIN}
@@ -684,12 +748,12 @@ Files:
   Certificate: ${crt}
   Private key: ${key}
   PKCS#12: ${p12}
-  CA certificate: ${ca_copy}
+  CA certificate: ${ca_copy}${server_ca_line}
   Apple profile: ${profile}
 
 iOS and macOS: open the .mobileconfig profile in Safari or AirDrop.
 Windows: import the .p12 into the computer store, then add an IKEv2 VPN with certificate authentication.
-Android: use the strongSwan app, IKEv2 certificate, select the .p12, and import ca.crt if asked.
+${android_note}
 EOF
   chmod 600 "$note"
 
@@ -701,7 +765,7 @@ Client certificate issued.
   Private key:       ${key}
   PKCS#12:           ${p12}
   PKCS#12 password:  ${p12_pass}
-  CA certificate:    ${ca_copy}
+  CA certificate:    ${ca_copy}${server_ca_line/Server CA (Android): /Server CA:         }
   Apple profile:     ${profile}
   Notes:             ${note}
 EOF
@@ -908,6 +972,7 @@ cmd_update() {
     --dataplane "$VPN_DATAPLANE"
     --skip-certbot
   )
+  [[ -n "${VPN_CERT_KEY_TYPE:-}" ]] && install_args+=(--key-type "$VPN_CERT_KEY_TYPE")
   [[ -n "${VPN_EMAIL:-}" ]] && install_args+=(--email "$VPN_EMAIL")
 
   log "Re-applying VPN configuration for ${VPN_DOMAIN}."

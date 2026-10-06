@@ -112,20 +112,16 @@ ec_curve_for_apple_type() {
   esac
 }
 
-# Prints base64(DER) of the PEM certificate in BUNDLE whose subject CN equals
-# the issuer CN of LEAF. Needed so ServerCertificateIssuerCommonName (YE2/E7)
-# matches the embedded com.apple.security.pkcs1 payload.
-apple_issuer_der_b64() {
-  local leaf="$1"
+# Prints the PEM certificate in BUNDLE whose subject CN is CN.
+bundle_cert_by_cn() {
+  local want="$1"
   local bundle="$2"
-  local want tmp part cn
-  want="$(cert_common_name "$leaf" issuer)"
-  [[ -n "$want" ]] || return 1
-  [[ -f "$bundle" ]] || return 1
+  local tmp part cn
+  [[ -n "$want" && -f "$bundle" ]] || return 1
   tmp="$(mktemp -d)"
   # Split a PEM bundle into individual cert files.
   awk -v dir="$tmp" '
-    /BEGIN CERTIFICATE/ { n++; f=sprintf("%s/%02d.pem", dir, n) }
+    /BEGIN CERTIFICATE/ { n++; f=sprintf("%s/%05d.pem", dir, n) }
     f { print > f }
     /END CERTIFICATE/ { f="" }
   ' "$bundle"
@@ -133,13 +129,27 @@ apple_issuer_der_b64() {
     [[ -f "$part" ]] || continue
     cn="$(cert_common_name "$part" subject 2>/dev/null || true)"
     if [[ "$cn" == "$want" ]]; then
-      openssl x509 -in "$part" -outform der | base64 | tr -d '\r\n'
+      openssl x509 -in "$part"
       rm -rf "$tmp"
       return 0
     fi
   done
   rm -rf "$tmp"
   return 1
+}
+
+# Prints the PEM certificate in BUNDLE that issued LEAF.
+server_issuer_pem() {
+  bundle_cert_by_cn "$(cert_common_name "$1" issuer)" "$2"
+}
+
+# Prints base64(DER) of the certificate in BUNDLE that issued LEAF. Needed so
+# ServerCertificateIssuerCommonName (YE2/E7) matches the embedded
+# com.apple.security.pkcs1 payload.
+apple_issuer_der_b64() {
+  local pem
+  pem="$(server_issuer_pem "$1" "$2")" || return 1
+  openssl x509 -outform der <<<"$pem" | base64 | tr -d '\r\n'
 }
 
 # Prints the CN from a certificate subject or issuer (RFC2253).
@@ -487,9 +497,6 @@ sync_server_cert() {
   cp -L "${live}/chain.pem" "$SERVER_CHAIN"
   chmod 644 "$SERVER_CRT" "$SERVER_CHAIN"
   chmod 600 "$SERVER_KEY"
-  # Older installs put chain.pem in cacerts as intermediate.crt; remove it so
-  # charon stops sending the intermediate in IKE_AUTH.
-  rm -f "${CACERT_DIR}/intermediate.crt"
   cert_hash="$(pubkey_md5 cert "$SERVER_CRT")"
   key_hash="$(pubkey_md5 key "$SERVER_KEY")"
   if [[ -z "$cert_hash" || "$cert_hash" != "$key_hash" ]]; then
@@ -497,6 +504,10 @@ sync_server_cert() {
   fi
   VPN_SERVER_KEY_TYPE="$(detect_key_type "$SERVER_KEY")"
   log "Server certificate matches its ${VPN_SERVER_KEY_TYPE} private key."
+  # Keep the intermediate out of cacerts so IKE_AUTH stays a single leaf.
+  # Sending it forces fragmentation, and many mobile IPv6 paths drop those
+  # fragments. Android gets this issuer as server-ca.crt instead.
+  rm -f "${CACERT_DIR}/intermediate.crt"
 }
 
 swanctl_load() {

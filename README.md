@@ -28,7 +28,7 @@ curl -fsSL https://raw.githubusercontent.com/alphajc/swangate/main/get.sh | sudo
 
 - 域名的 AAAA 记录已经指向这台服务器。安装程序会用这条 AAAA 记录，或本机唯一的全局 IPv6。一台机器有多个 IPv6 时再加 `--ipv6`。
 - 80/tcp 没被占用，Let's Encrypt 要用它验证域名。已有有效证书时会跳过这一步。
-- 云厂商安全组放行 IPv6 的 UDP/500、UDP/4500，以及证书申请和续期用的 TCP/80。本机防火墙由安装程序处理。规则见「云主机安全组」。
+- 云厂商安全组放行 IPv6 的 UDP/500、UDP/4500、ESP（IP 协议 50），以及证书申请和续期用的 TCP/80。本机防火墙由安装程序处理。规则见「云主机安全组」。
 
 ## 命令
 
@@ -75,6 +75,7 @@ curl -fsSL https://raw.githubusercontent.com/alphajc/swangate/main/get.sh | sudo
 | `--backend` | `auto` | `ipsec`（ipsec.conf）或 `swanctl` |
 | `--firewall` | `auto` | `firewalld`、`iptables` 或 `nftables` |
 | `--dataplane` | `auto` | `kernel` 或 `libipsec` |
+| `--key-type` | 现有证书的类型，没有证书时 `rsa` | 服务器和客户端证书的密钥类型。`rsa` 是 iOS、macOS、Windows 和 Android 都能用的默认值 |
 
 也可以用环境变量传参，例如 `VPN_DOMAIN`、`VPN_IPV6`、`VPN_EMAIL`。
 
@@ -98,7 +99,7 @@ NixOS、Gentoo、Void 以及其他系统不支持，安装程序会在改动任�
 
 - **StrongSwan**：有 `strongswan-starter` 就写 `ipsec.conf`；只有 swanctl（如 Fedora、Arch）就写 `swanctl/conf.d/ikev2-vpn.conf`。两套服务都在时只启用一套。
 - **防火墙**：正在运行的 firewalld 优先；否则用 iptables；再否则用 nftables。iptables 和 nftables 规则会在开机时自动恢复。
-- **数据通道**：iOS 只用 AES-CBC + SHA2-256 建立数据通道。内核不支持这组算法时（会报 `Requested type not found`），自动改用 StrongSwan 的用户态 `kernel-libipsec`。子 SA 优先协商带 DH14 的 PFS，并保留不含 DH 的算法给旧客户端。
+- **数据通道**：iOS 只用 AES-CBC + SHA2-256 建立数据通道。内核不支持这组算法时（会报 `Requested type not found`），自动改用 StrongSwan 的用户态 `kernel-libipsec`。子 SA 优先协商带 DH14 的 PFS，并保留不含 DH 的算法给旧客户端。`kernel-libipsec` 从 StrongSwan 5.9.11 起才能收发不封装的 ESP，更旧的版本接不了 Android 系统自带 VPN。
 - **内核参数**：写入 `/etc/sysctl.d/99-ikev2-vpn.conf`，打开转发，关闭反向路径过滤和 ICMP 重定向，避免 IPsec 流量被丢掉。内核支持时启用 BBR，并加大连接跟踪表和 UDP 超时，减少 NAT-T 映射过期。思路参考 [setup-ipsec-vpn](https://github.com/hwdsl2/setup-ipsec-vpn)，不包含它的 L2TP 和 Libreswan。
 
 ## 云主机安全组
@@ -110,11 +111,12 @@ VPN 入口是 IPv6。入站来源填 IPv6；客户端地址不固定时用 `::/0
 | 协议 | 端口 | 方向 | 地址族 | 用途 |
 | --- | --- | --- | --- | --- |
 | UDP | 500 | 入站 | IPv6 | IKE 协商从这里开始 |
-| UDP | 4500 | 入站 | IPv6 | 后续的 IKE 和 ESP。服务端强制把 ESP 封装进 UDP |
+| UDP | 4500 | 入站 | IPv6 | 后续的 IKE 和封装在 UDP 里的 ESP（iOS、macOS、Windows） |
+| ESP（IP 协议 50） | 无 | 入站 | IPv6 | Android 系统自带 VPN 的数据。它走 IPv6 时不做 NAT-T，ESP 不封装进 UDP |
 | TCP | 80 | 入站 | IPv6 | Let's Encrypt 的 HTTP-01。没有有效证书时安装会用到，之后续期也会用到。已经有证书，并且安装时加了 `--skip-certbot`，这条可以不开放 |
 | ICMPv6 | Packet Too Big（类型 2） | 入站 | IPv6 | 告知路径 MTU。安装程序会钳制 TCP MSS，大包仍然依赖这条 ICMP |
 
-ESP 封装在 UDP/4500 里，安全组不用再放行 IP 协议 50。控制台里的「自定义协议」或「协议号」不必填 50。
+ESP 没有端口。控制台里选「自定义协议」或「协议号」，填 50。iOS、macOS 和 Windows 的数据在 UDP/4500 里，Android 系统自带 VPN 走这条 ESP。
 
 管理用的 SSH（常见是 TCP/22）按你自己的来源限制，和 VPN 无关。出站保持默认放行即可，certbot 要能访问 Let's Encrypt。
 
@@ -128,7 +130,7 @@ Let's Encrypt 会顺着域名的 AAAA 记录访问 80/tcp。域名如果同时�
 - **AWS**：安全组入站来源填 `::/0`。
 - **GCP**：VPC 防火墙规则的来源 IP 范围填 IPv6，例如 `::/0`。
 
-连不上时，先在控制台确认规则挂在这台实例上，并且地址族是 IPv6。然后在服务器上执行 `sudo swangate status`，看 `Firewall` 是 firewalld、iptables 还是 nftables。安装程序会在这一层放行 UDP/500 和 UDP/4500。
+连不上时，先在控制台确认规则挂在这台实例上，并且地址族是 IPv6。然后在服务器上执行 `sudo swangate status`，看 `Firewall` 是 firewalld、iptables 还是 nftables。安装程序会在这一层放行 UDP/500、UDP/4500 和 ESP。
 
 ## 客户端
 
@@ -136,13 +138,50 @@ Let's Encrypt 会顺着域名的 AAAA 记录访问 80/tcp。域名如果同时�
 
 - `alice.mobileconfig`：iOS / macOS 描述文件，已用服务器证书签名，包含客户端证书
 - `alice.p12`：Windows、Android 用；随机口令打印在终端，也写在 `connection.txt`
+- `server-ca.crt`：签发服务器证书的 Let's Encrypt 中间证书，Android 用它校验服务器
 - `alice.crt`、`alice.key`、`ca.crt`
 
 导入方法：
 
 - **iPhone / Mac**：用隔空投送或 Safari 打开 `.mobileconfig`，在设置里安装。
 - **Windows**：把 `.p12` 导入到“本地计算机”证书存储，新建 IKEv2 VPN，服务器填域名，认证方式选证书。
-- **Android**：安装 strongSwan 客户端，类型选 IKEv2 证书，选择 `.p12`；提示时导入 `ca.crt`。
+- **Android**：用系统自带 VPN，见下一节。
+
+### Android
+
+用系统自带的「IKEv2/IPSec RSA」，不用装 App。需要 Android 11 或更新版本；到 Android 16 字段都没变。下面的菜单名按原版 Android 写，各家手机略有不同，找不到时在设置里搜索「安装证书」或「VPN」。
+
+一次 `swangate install` 发出的证书是 RSA。iOS、macOS、Windows 和 Android 用同一张服务器证书：Android 系统 VPN 只会做 RSA 签名，另外三个系统也接受 RSA。`sudo swangate status` 里 `Server key` 如果还是 ECDSA（更早的默认），执行 `sudo swangate install --key-type rsa`，再 `sudo swangate update --skip-self --reissue-clients`，然后让 iPhone 和 Mac 重装描述文件。
+
+另外两件事先确认：
+
+- 云安全组放行了 IPv6 的 ESP（IP 协议 50）。系统 VPN 走 IPv6 时不把 ESP 封装进 UDP。
+- 数据通道是 `kernel`，或者是 StrongSwan 5.9.11 及以上的 `libipsec`（`sudo swangate status` 里的 `Dataplane`）。
+
+把 `alice.p12` 和 `server-ca.crt` 拷到手机上。口令在 `connection.txt` 的 `PKCS#12 password` 一行，只在导入证书时用；VPN 本身没有账号密码。
+
+导入两张证书（设置 → 安全和隐私 → 更多安全和隐私设置 → 加密与凭据 → 安装证书）：
+
+1. 选「VPN 和应用用户证书」，打开 `alice.p12`，输入口令。
+2. 选「CA 证书」，打开 `server-ca.crt`。系统会提醒网络可能受到监控，这是安装任何自定义 CA 时的固定提示。
+
+`server-ca.crt` 就是签发这张服务器证书的 Let's Encrypt 中间证书。握手里不附带它，避免 IKE 包变大后在移动 IPv6 上被丢掉。Android 不使用系统信任库，所以要把这张证书装进去。`ca.crt` 是签发客户端证书的 CA，不用装到手机上。Let's Encrypt 轮换中间证书后，`connection.txt` 里的名字会变，重新 `issue` 并把新的 `server-ca.crt` 装一次。
+
+新建 VPN（设置 → 网络和互联网 → VPN → 右上角「+」）：
+
+| 字段 | 填写 |
+| --- | --- |
+| 名称 | 随意 |
+| 类型 | `IKEv2/IPSec RSA` |
+| 服务器地址 | 域名，即 `connection.txt` 的 `Server`。不要填 IPv6 地址，证书里只有域名 |
+| IPSec 标识符 | 客户端名字，即 `connection.txt` 的 `Local ID`，例如 `alice` |
+| IPSec 用户证书 | 第 1 步导入的证书 |
+| IPSec CA 证书 | 第 2 步导入的 CA（`connection.txt` 里写了它的名字）。不要选「不验证服务器」 |
+| IPSec 服务器证书 | 从服务器接收 |
+
+保存后点开连接。连上后 IPv4 和 IPv6 流量都走 VPN。手机所在网络必须有 IPv6，服务器只发布了 AAAA 记录。
+
+想开机自动连接，在 VPN 列表里点这条配置旁的齿轮，打开「始终开启的 VPN」。
 
 ## 吊销
 
