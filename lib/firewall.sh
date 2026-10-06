@@ -57,6 +57,8 @@ iptables_rules() {
   local iface="$4"
   local bin pool
   for bin in iptables ip6tables; do
+    # The Android built-in VPN sends plain ESP over IPv6 (no NAT-T there).
+    printf '%s filter INPUT -p esp -j ACCEPT\n' "$bin"
     printf '%s filter INPUT -p udp --dport 4500 -j ACCEPT\n' "$bin"
     printf '%s filter INPUT -p udp --dport 500 -j ACCEPT\n' "$bin"
     printf '%s filter INPUT -m conntrack --ctstate INVALID -j DROP\n' "$bin"
@@ -129,6 +131,7 @@ table inet ikev2_vpn {
         type filter hook input priority -5; policy accept;
         ct state invalid drop
         udp dport { 500, 4500 } accept
+        meta l4proto esp accept
     }
     chain forward {
         type filter hook forward priority -5; policy accept;${mss_rule}

@@ -636,6 +636,8 @@ charon {
     plugins {
         kernel-libipsec {
             load = ${load}
+            # Android's built-in VPN negotiates plain ESP over IPv6.
+            raw_esp = yes
         }
     }
 }

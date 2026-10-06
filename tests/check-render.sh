@@ -55,6 +55,8 @@ for sub in install issue revoke status; do
 done
 expect_fail "install without domain" "$ROOT/swangate" install --ipv6 2001:db8::1 </dev/null
 expect_fail "bad backend" "$ROOT/swangate" install --domain vpn.example.com --ipv6 2001:db8::1 --backend nope
+expect_fail "bad key type" "$ROOT/swangate" install --domain vpn.example.com --ipv6 2001:db8::1 --key-type dsa
+"$ROOT/swangate" install --help | grep -q -- '--key-type' || fail "install help lists --key-type"
 expect_fail "issue without name" "$ROOT/swangate" issue
 VPN_DOMAIN=
 VPN_EMAIL=
@@ -234,6 +236,7 @@ expect_eq "forced kernel" "$(dataplane_for "${tmp}/crypto-missing" "${tmp}/none"
 expect_fail "no crypto and no plugin" dataplane_for "${tmp}/crypto-missing" "${tmp}/none"
 write_libipsec_conf "${tmp}/strongswan.d" libipsec
 grep -q 'load = yes' "${tmp}/strongswan.d/zz-ikev2-vpn.conf" || fail "libipsec load"
+grep -q 'raw_esp = yes' "${tmp}/strongswan.d/zz-ikev2-vpn.conf" || fail "libipsec raw ESP for Android"
 grep -q 'fragment_size = 576' "${tmp}/strongswan.d/zz-ikev2-vpn.conf" || fail "fragment_size"
 write_libipsec_conf "${tmp}/strongswan.d" kernel
 grep -q 'load = no' "${tmp}/strongswan.d/zz-ikev2-vpn.conf" || fail "kernel load"
@@ -247,6 +250,7 @@ grep -q 'ip6tables nat POSTROUTING -s fd00:10:10::/64 -o eth0 -m policy --dir ou
 grep -q 'iptables filter INPUT -m conntrack --ctstate INVALID -j DROP' <<<"$rules" || fail "v4 invalid"
 grep -q 'iptables filter FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT' <<<"$rules" || fail "v4 established"
 grep -q 'ip6tables mangle FORWARD .*TCPMSS' <<<"$rules" || fail "v6 mss"
+grep -q 'ip6tables filter INPUT -p esp -j ACCEPT' <<<"$rules" || fail "v6 plain ESP for Android"
 rules="$(iptables_rules libipsec 10.10.10.0/24 fd00:10:10::/64 eth0)"
 grep -q 'iptables filter FORWARD -i ipsec0 -j ACCEPT' <<<"$rules" || fail "libipsec forward"
 if grep -q -- '--pol ipsec' <<<"$rules"; then fail "libipsec must not use policy match"; fi
@@ -256,6 +260,7 @@ grep -q 'ip6 saddr fd00:10:10::/64 oifname "eth0" rt ipsec missing masquerade' <
 grep -q 'ct state invalid drop' <<<"$nft_text" || fail "nft invalid"
 grep -q 'ct state { established, related } accept' <<<"$nft_text" || fail "nft established"
 grep -q 'udp dport { 500, 4500 } accept' <<<"$nft_text" || fail "nft ports"
+grep -q 'meta l4proto esp accept' <<<"$nft_text" || fail "nft plain ESP for Android"
 grep -q 'maxseg size set rt mtu' <<<"$nft_text" || fail "nft mss"
 if grep -q 'maxseg' <<<"$(nftables_ruleset kernel 10.10.10.0/24 fd00:10:10::/64 eth0 no)"; then
   fail "nft without mss"
@@ -410,6 +415,7 @@ VPN_FIREWALL=nftables
 VPN_DATAPLANE=libipsec
 VPN_DISTRO_FAMILY=rhel
 VPN_DISTRO_ID=rocky
+VPN_CERT_KEY_TYPE=ecdsa
 save_config
 require_root() { :; }
 svc_is_active() { return 1; }
@@ -428,6 +434,12 @@ openssl x509 -in "${VPN_CLIENTS_DIR}/alice/alice.crt" -noout -ext subjectAltName
   || fail "client SAN carries the IKE identity"
 p12_pass="$(awk -F': ' '/PKCS#12 password/ {print $2}' "${VPN_CLIENTS_DIR}/alice/connection.txt")"
 openssl pkcs12 -in "${VPN_CLIENTS_DIR}/alice/alice.p12" -passin "pass:${p12_pass}" -noout || fail "p12 password"
+p12_info="$(openssl pkcs12 -in "${VPN_CLIENTS_DIR}/alice/alice.p12" -passin "pass:${p12_pass}" -noout -info 2>&1)"
+grep -q 'MAC: sha1' <<<"$p12_info" || fail "p12 SHA1 MAC for Android"
+grep -q 'Shrouded Keybag: pbeWithSHA1And3-KeyTripleDES-CBC' <<<"$p12_info" || fail "p12 3DES key for Android"
+grep -q 'only signs with RSA' "${VPN_CLIENTS_DIR}/alice/connection.txt" || fail "ECDSA note points Android to rsa"
+[[ ! -e "${VPN_CLIENTS_DIR}/alice/server-ca.crt" ]] || fail "ECDSA server writes no Android CA"
+if grep -q 'strongSwan app' "${VPN_CLIENTS_DIR}/alice/connection.txt"; then fail "connection.txt still names the strongSwan app"; fi
 python3 - "${VPN_CLIENTS_DIR}/alice/alice.mobileconfig" <<'PY' || fail "signed profile"
 import sys
 data = open(sys.argv[1], "rb").read()
@@ -490,6 +502,7 @@ need = {
     "--backend": "swanctl",
     "--firewall": "nftables",
     "--dataplane": "libipsec",
+    "--key-type": "ecdsa",
     "--clients-dir": None,
     "--skip-certbot": None,
 }
@@ -579,6 +592,98 @@ if "<key>DisableMOBIKE</key>\n                <false/>" in text:
 if "<key>IKESAParameters</key>" in text or "<key>ChildSAParameters</key>" in text:
     raise SystemExit("legacy SA parameter key names must not be used")
 PY
+
+# RSA server (Android built-in VPN): Let's Encrypt chain EE <- YR2 <- Root YR
+# (cross-signed by ISRG Root X1). The server sends YR2; Android trusts Root YR.
+(
+  rsa_ca() {
+    local cn="$1" key="$2" out="$3" signer_crt="${4:-}" signer_key="${5:-}"
+    printf 'basicConstraints = critical, CA:TRUE\nkeyUsage = critical, keyCertSign, cRLSign\n' >"${tmp}/ca.ext"
+    if [[ -z "$signer_crt" ]]; then
+      openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=${cn}" -keyout "$key" -out "$out" \
+        >/dev/null 2>&1
+    else
+      openssl req -new -newkey rsa:2048 -nodes -subj "/CN=${cn}" -keyout "$key" -out "${tmp}/ca.csr" >/dev/null 2>&1
+      openssl x509 -req -in "${tmp}/ca.csr" -CA "$signer_crt" -CAkey "$signer_key" -CAcreateserial \
+        -days 30 -extfile "${tmp}/ca.ext" -out "$out" >/dev/null 2>&1
+    fi
+  }
+  r="${tmp}/rsa"
+  mkdir -p "$r"
+  rsa_ca "Fake ISRG Root X1" "${r}/x1.key" "${r}/x1.crt"
+  rsa_ca "Fake Root YR" "${r}/yr.key" "${r}/yr-cross.crt" "${r}/x1.crt" "${r}/x1.key"
+  rsa_ca "Fake YR2" "${r}/yr2.key" "${r}/yr2.crt" "${r}/yr-cross.crt" "${r}/yr.key"
+
+  VPN_DOMAIN=rsa.example.com
+  VPN_CLIENTS_DIR="${tmp}/rsa-clients"
+  VPN_SWAN_ETC="${tmp}/swan-rsa"
+  set_swan_paths swanctl "$VPN_SWAN_ETC"
+  live="${LETSENCRYPT_DIR}/live/${VPN_DOMAIN}"
+  mkdir -p "$live"
+  openssl req -new -newkey rsa:2048 -nodes -subj "/CN=${VPN_DOMAIN}" \
+    -keyout "${live}/privkey.pem" -out "${r}/leaf.csr" >/dev/null 2>&1
+  openssl x509 -req -in "${r}/leaf.csr" -CA "${r}/yr2.crt" -CAkey "${r}/yr2.key" -CAcreateserial \
+    -days 90 -out "${live}/cert.pem" >/dev/null 2>&1
+  cat "${r}/yr2.crt" "${r}/yr-cross.crt" >"${live}/chain.pem"
+
+  VPN_CERT_KEY_TYPE=rsa
+  expect_eq "live key type" "$(live_cert_key_type)" rsa
+  server_cert_is_current || fail "fresh RSA cert should be current"
+  VPN_CERT_KEY_TYPE=ecdsa
+  if server_cert_is_current; then fail "RSA cert must not satisfy --key-type ecdsa"; fi
+  VPN_CERT_KEY_TYPE=rsa
+
+  sync_server_cert >/dev/null
+  expect_eq "RSA server key" "$VPN_SERVER_KEY_TYPE" RSA
+  [[ -f "${CACERT_DIR}/intermediate.crt" ]] || fail "RSA server must send its issuer"
+  expect_eq "sent intermediate" "$(cert_common_name "${CACERT_DIR}/intermediate.crt" subject)" "Fake YR2"
+  expect_eq "one intermediate sent" "$(grep -c 'BEGIN CERTIFICATE' "${CACERT_DIR}/intermediate.crt")" 1
+
+  save_config
+  cmd_issue carol >"${r}/issue.out"
+  d="${VPN_CLIENTS_DIR}/carol"
+  expect_eq "RSA client cert" "$(apple_certificate_type "${d}/carol.crt")" RSA
+  [[ -f "${d}/server-ca.crt" ]] || fail "RSA issue writes server-ca.crt"
+  expect_eq "Android anchor" "$(cert_common_name "${d}/server-ca.crt" subject)" "Fake Root YR"
+  openssl verify -partial_chain -CAfile "${d}/server-ca.crt" -untrusted "${CACERT_DIR}/intermediate.crt" \
+    "$SERVER_CRT" >/dev/null || fail "leaf + sent intermediate must chain to server-ca.crt"
+  grep -q 'IKEv2/IPSec RSA' "${d}/connection.txt" || fail "Android note names IKEv2/IPSec RSA"
+  grep -q 'IPSec identifier carol' "${d}/connection.txt" || fail "Android note gives the IPSec identifier"
+  grep -q "Server CA (Android): ${d}/server-ca.crt" "${d}/connection.txt" || fail "connection.txt lists server-ca.crt"
+  grep -q 'Server CA: ' "${r}/issue.out" || fail "issue prints server-ca.crt"
+
+  # Older hierarchy (R12 signed by ISRG Root X1): the anchor comes from the system store.
+  rsa_ca "Fake R12" "${r}/r12.key" "${r}/r12.crt" "${r}/x1.crt" "${r}/x1.key"
+  openssl x509 -req -in "${r}/leaf.csr" -CA "${r}/r12.crt" -CAkey "${r}/r12.key" -CAcreateserial \
+    -days 30 -out "${r}/r12-leaf.crt" >/dev/null 2>&1
+  cat "${r}/yr-cross.crt" "${r}/x1.crt" >"${r}/system-bundle.pem"
+  SYSTEM_CA_BUNDLES="${r}/missing.pem ${r}/system-bundle.pem"
+  expect_eq "system store anchor" \
+    "$(android_server_ca_pem "${r}/r12-leaf.crt" "${r}/r12.crt" | cert_common_name /dev/stdin subject)" \
+    "Fake ISRG Root X1"
+  SYSTEM_CA_BUNDLES="${r}/missing.pem"
+  if android_server_ca_pem "${r}/r12-leaf.crt" "${r}/r12.crt" >/dev/null; then
+    fail "missing anchor must be reported"
+  fi
+
+  # certbot gets --cert-name with the key type so an existing lineage can switch.
+  printf '#!/bin/sh\nif [ "$1" = "--help" ]; then echo "--key-type"; exit 0; fi\nprintf "%%s\\n" "$@" >"%s"\n' \
+    "${r}/certbot.args" >"${r}/certbot"
+  chmod 755 "${r}/certbot"
+  firewall_http_open() { :; }
+  firewall_http_close() { :; }
+  CERTBOT_BIN="${r}/certbot"
+  VPN_CERTBOT_STAGING=0
+  VPN_EMAIL=admin@example.com
+  run_certbot >/dev/null 2>&1
+  tr '\n' ' ' <"${r}/certbot.args" | grep -q -- "--cert-name ${VPN_DOMAIN} .*--key-type rsa --rsa-key-size 2048" \
+    || fail "certbot RSA args"
+  VPN_CERT_KEY_TYPE=ecdsa
+  run_certbot >/dev/null 2>&1
+  tr '\n' ' ' <"${r}/certbot.args" | grep -q -- '--key-type ecdsa --elliptic-curve secp256r1' \
+    || fail "certbot ECDSA args"
+) || fail "RSA server for the Android built-in VPN"
+ok
 
 # get.sh installs from a tarball and runs the subcommand.
 mkdir -p "${tmp}/tarsrc/swangate-main"
