@@ -301,12 +301,86 @@ moddir="${tmp}/modprobe.d"
 mkdir -p "$moddir"
 printf 'install esp4 /bin/false\ninstall esp6 /usr/bin/false\n' >"${moddir}/disable-esp.conf"
 printf 'install e1000 /sbin/modprobe --ignore-install e1000\n' >"${moddir}/other.conf"
-esp_warn="$(IKEV2_MODPROBE_DIRS="$moddir" warn_blocked_esp_modules 2>&1 || true)"
+printf 'install esp6 /bin/true\n' >"${moddir}/disable-esp6-true.conf"
+blocked="$(IKEV2_MODPROBE_DIRS="$moddir" blocked_esp_modules)"
+grep -q "^esp4 ${moddir}/disable-esp.conf$" <<<"$blocked" || fail "esp4 blocked"
+grep -q "^esp6 ${moddir}/disable-esp.conf$" <<<"$blocked" || fail "esp6 blocked"
+grep -q "^esp6 ${moddir}/disable-esp6-true.conf$" <<<"$blocked" || fail "esp6 /bin/true blocked"
+if grep -q 'e1000' <<<"$blocked"; then fail "unrelated modprobe line reported"; fi
+override="${tmp}/modprobe-override/00-ikev2-vpn-esp.conf"
+esp_warn="$(IKEV2_MODPROBE_DIRS="$moddir" ESP_MODPROBE_OVERRIDE="$override" unblock_esp_modules 2>&1)"
 grep -q 'esp4 is disabled' <<<"$esp_warn" || fail "esp4 warning"
-grep -q 'esp6 is disabled' <<<"$esp_warn" || fail "esp6 warning"
-if grep -q 'e1000' <<<"$esp_warn"; then fail "unrelated modprobe line warned"; fi
-esp_ok="$(IKEV2_MODPROBE_DIRS="${tmp}/no-such-modprobe" warn_blocked_esp_modules 2>&1 || true)"
-[[ -z "$esp_ok" ]] || fail "missing modprobe dir should be quiet"
+grep -q 'Overriding it' <<<"$esp_warn" || fail "override warning"
+# shellcheck disable=SC2016
+grep -Eq '^install esp4 /.*modprobe --ignore-install esp4 \$CMDLINE_OPTS$' "$override" || fail "esp4 override"
+# shellcheck disable=SC2016
+grep -Eq '^install esp6 /.*modprobe --ignore-install esp6 \$CMDLINE_OPTS$' "$override" || fail "esp6 override"
+# The override file itself must not count as a block, or reruns would warn forever.
+cp "$override" "${moddir}/00-ikev2-vpn-esp.conf"
+[[ -z "$(IKEV2_MODPROBE_DIRS="${moddir}" blocked_esp_modules | grep 00-ikev2 || true)" ]] \
+  || fail "override reported as a block"
+rm -f "$override"
+esp_ok="$(IKEV2_MODPROBE_DIRS="${tmp}/no-such-modprobe" ESP_MODPROBE_OVERRIDE="$override" unblock_esp_modules 2>&1)"
+[[ -z "$esp_ok" && ! -e "$override" ]] || fail "no blocked modules should be quiet and write nothing"
+kernel_module_list | grep -qx esp6 || fail "module list has esp6"
+kernel_module_list | grep -qx hmac || fail "module list has hmac"
+expect_eq "debian extra modules" "$(DISTRO_FAMILY=debian kernel_extra_packages)" "linux-modules-extra-$(uname -r)"
+DISTRO_FAMILY=rhel kernel_extra_packages | grep -qx kernel-modules-extra || fail "rhel extra modules"
+[[ -z "$(DISTRO_FAMILY=arch kernel_extra_packages)" ]] || fail "arch has no extra modules package"
+ok
+
+# StrongSwan version gates raw ESP in kernel-libipsec.
+for v in 5.9.11 5.9.14 5.10.0 6.0.1; do
+  strongswan_has_raw_esp "$v" || fail "${v} should support raw ESP"
+done
+for v in 5.9.8 5.9.10 5.8.2 ""; do
+  if strongswan_has_raw_esp "$v"; then fail "'${v}' should not support raw ESP"; fi
+done
+expect_eq "version override" "$(IKEV2_STRONGSWAN_VERSION=5.9.8 strongswan_version)" 5.9.8
+expect_eq "swanctl version" "$(
+  IKEV2_STRONGSWAN_VERSION=""
+  have_cmd() { [[ "$1" == swanctl ]]; }
+  swanctl() { printf "connecting to 'unix:///var/run/charon.vici' failed\n" >&2; printf 'strongSwan 5.9.8 swanctl\n' >&2; }
+  strongswan_version
+)" 5.9.8
+expect_eq "ipsec version" "$(
+  IKEV2_STRONGSWAN_VERSION=""
+  have_cmd() { [[ "$1" == ipsec ]]; }
+  # shellcheck disable=SC2317
+  ipsec() { printf 'Linux strongSwan U5.9.14/K6.1.0-28-amd64\n'; }
+  strongswan_version
+)" 5.9.14
+configure_args="$(strongswan_configure_args /tmp/units)"
+for want in --prefix=/usr --sysconfdir=/etc --libexecdir=/usr/lib --with-ipsecdir=/usr/lib/ipsec \
+  --with-systemdsystemunitdir=/tmp/units --enable-kernel-libipsec --enable-openssl --enable-systemd \
+  --enable-stroke --enable-swanctl; do
+  grep -qx -- "$want" <<<"$configure_args" || fail "configure args miss ${want}"
+done
+built=0
+build_strongswan_from_source() { built=1; }
+VPN_DATAPLANE=kernel IKEV2_STRONGSWAN_VERSION=5.9.8 ensure_libipsec_raw_esp
+[[ "$built" -eq 0 ]] || fail "kernel dataplane must not build StrongSwan"
+VPN_DATAPLANE=libipsec IKEV2_STRONGSWAN_VERSION=5.9.14 IKEV2_APPARMOR_DIR="${tmp}/apparmor" \
+  ensure_libipsec_raw_esp >/dev/null
+[[ "$built" -eq 0 ]] || fail "new StrongSwan must not be rebuilt"
+VPN_DATAPLANE=libipsec IKEV2_STRONGSWAN_VERSION=5.9.8 IKEV2_APPARMOR_DIR="${tmp}/apparmor" \
+  ensure_libipsec_raw_esp >/dev/null 2>&1
+[[ "$built" -eq 1 ]] || fail "old StrongSwan with libipsec must be rebuilt"
+built=0
+VPN_DATAPLANE=libipsec IKEV2_STRONGSWAN_VERSION=5.9.8 IKEV2_SKIP_SWAN_BUILD=1 IKEV2_APPARMOR_DIR="${tmp}/apparmor" \
+  ensure_libipsec_raw_esp >/dev/null 2>&1
+[[ "$built" -eq 0 ]] || fail "IKEV2_SKIP_SWAN_BUILD must skip the build"
+mkdir -p "${tmp}/apparmor"
+: >"${tmp}/apparmor/usr.lib.ipsec.charon"
+IKEV2_APPARMOR_DIR="${tmp}/apparmor" allow_charon_raw_socket
+IKEV2_APPARMOR_DIR="${tmp}/apparmor" allow_charon_raw_socket
+grep -qx 'network inet6 raw,' "${tmp}/apparmor/local/usr.lib.ipsec.charon" || fail "apparmor raw socket"
+[[ "$(grep -c 'ikev2-vpn raw ESP' "${tmp}/apparmor/local/usr.lib.ipsec.charon")" == 1 ]] || fail "apparmor rule added twice"
+expect_fail "source build outside Debian" bash -c "
+  source '${ROOT}/lib/common.sh'; source '${ROOT}/lib/distro.sh'
+  DISTRO_FAMILY=rhel IKEV2_STRONGSWAN_VERSION=5.9.8 build_strongswan_from_source"
+# shellcheck source=lib/distro.sh
+source "${ROOT}/lib/distro.sh"
 ok
 
 # StrongSwan configuration for both backends.
@@ -475,6 +549,12 @@ cmd_issue bob >/dev/null
 status_out="$(cmd_status)"
 grep -q 'StrongSwan:      swanctl (strongswan) inactive' <<<"$status_out" || fail "status backend"
 grep -q 'Dataplane:       libipsec' <<<"$status_out" || fail "status dataplane"
+grep -q 'Version:         ' <<<"$status_out" || fail "status StrongSwan version"
+status_new="$(IKEV2_STRONGSWAN_VERSION=5.9.14 cmd_status)"
+grep -q 'Raw ESP:         yes' <<<"$status_new" || fail "status raw ESP yes"
+grep -q 'Version:         5.9.14' <<<"$status_new" || fail "status shows version"
+status_old="$(IKEV2_STRONGSWAN_VERSION=5.9.8 cmd_status)"
+grep -q 'Raw ESP:         no' <<<"$status_old" || fail "status raw ESP no"
 grep -q 'Connection:      ikev2-cert loaded' <<<"$status_out" || fail "status connection"
 grep -Eq 'alice +revoked' <<<"$status_out" || fail "status shows revoked alice"
 grep -Eq 'alice +valid' <<<"$status_out" || fail "status shows reissued alice"
@@ -501,7 +581,7 @@ need = {
     "--interface": "eth0",
     "--backend": "swanctl",
     "--firewall": "nftables",
-    "--dataplane": "libipsec",
+    "--dataplane": "auto",
     "--key-type": "ecdsa",
     "--clients-dir": None,
     "--skip-certbot": None,
@@ -521,6 +601,11 @@ PY
 grep -qx -- '--force alice' "${tmp}/update-issue.log" || fail "update reissues alice"
 grep -qx -- '--force bob' "${tmp}/update-issue.log" || fail "update reissues bob"
 [[ "$(grep -c -- '--force' "${tmp}/update-issue.log")" == 2 ]] || fail "update must not reissue revoked-only names"
+expect_eq "legacy libipsec reprobes" "$(VPN_DATAPLANE_REQUEST='' VPN_DATAPLANE=libipsec update_dataplane_arg)" auto
+expect_eq "legacy kernel stays" "$(VPN_DATAPLANE_REQUEST='' VPN_DATAPLANE=kernel update_dataplane_arg)" kernel
+expect_eq "explicit libipsec kept" "$(VPN_DATAPLANE_REQUEST=libipsec VPN_DATAPLANE=libipsec update_dataplane_arg)" libipsec
+expect_eq "saved auto kept" "$(VPN_DATAPLANE_REQUEST=auto VPN_DATAPLANE=libipsec update_dataplane_arg)" auto
+grep -q '^VPN_DATAPLANE_REQUEST=' "$(config_file)" || fail "config saves the dataplane request"
 # Restore real command implementations shadowed by the mocks above.
 # shellcheck source=lib/commands.sh
 source "${ROOT}/lib/commands.sh"
