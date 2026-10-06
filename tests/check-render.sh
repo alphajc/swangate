@@ -346,6 +346,7 @@ expect_eq "swanctl version" "$(
 expect_eq "ipsec version" "$(
   IKEV2_STRONGSWAN_VERSION=""
   have_cmd() { [[ "$1" == ipsec ]]; }
+  # shellcheck disable=SC2317
   ipsec() { printf 'Linux strongSwan U5.9.14/K6.1.0-28-amd64\n'; }
   strongswan_version
 )" 5.9.14
