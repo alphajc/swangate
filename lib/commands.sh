@@ -56,9 +56,10 @@ Options:
   --backend NAME         auto, ipsec, or swanctl (default: auto)
   --firewall NAME        auto, firewalld, iptables, or nftables (default: auto)
   --dataplane NAME       auto, kernel, or libipsec (default: auto)
-  --key-type TYPE        Server and client key type: ecdsa or rsa
+  --key-type TYPE        Server and client key type: rsa or ecdsa
                          (default: the existing certificate's type, else
-                         ecdsa). The Android built-in VPN needs rsa.
+                         rsa). rsa works on iOS, macOS, Windows, and the
+                         Android built-in VPN.
   --staging              Use the Let's Encrypt staging server
   --skip-certbot         Do not run certbot; reuse an existing certificate
   -h, --help             Show this help
@@ -512,7 +513,7 @@ cmd_install() {
   local live_type=""
   have_cmd openssl && live_type="$(live_cert_key_type)"
   if [[ -z "$VPN_CERT_KEY_TYPE" ]]; then
-    VPN_CERT_KEY_TYPE="${live_type:-ecdsa}"
+    VPN_CERT_KEY_TYPE="${live_type:-rsa}"
   fi
   log "Using ${VPN_CERT_KEY_TYPE} keys for the server and client certificates."
 
@@ -714,12 +715,12 @@ cmd_issue() {
   local android_note server_ca_cn="" server_ca_line=""
   rm -f "$server_ca"
   if [[ "$server_type" == "RSA" ]]; then
-    if android_server_ca_pem "$SERVER_CRT" "$chain_src" >"$server_ca"; then
+    if server_issuer_pem "$SERVER_CRT" "$chain_src" >"$server_ca"; then
       chmod 644 "$server_ca"
       server_ca_cn="$(cert_common_name "$server_ca" subject)"
     else
       rm -f "$server_ca"
-      warn "Cannot find the CA above ${issuer_cn}. Android must trust it to verify the server."
+      warn "Cannot find the issuer of the server certificate in ${chain_src}. Android must trust it to verify the server."
     fi
   fi
   if [[ -n "$server_ca_cn" ]]; then

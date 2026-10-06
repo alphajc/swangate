@@ -593,26 +593,13 @@ if "<key>IKESAParameters</key>" in text or "<key>ChildSAParameters</key>" in tex
     raise SystemExit("legacy SA parameter key names must not be used")
 PY
 
-# RSA server (Android built-in VPN): Let's Encrypt chain EE <- YR2 <- Root YR
-# (cross-signed by ISRG Root X1). The server sends YR2; Android trusts Root YR.
+# RSA is the default and what Android, iOS, macOS, and Windows all accept.
+# The issuer stays out of IKE_AUTH; Android trusts it via server-ca.crt.
 (
-  rsa_ca() {
-    local cn="$1" key="$2" out="$3" signer_crt="${4:-}" signer_key="${5:-}"
-    printf 'basicConstraints = critical, CA:TRUE\nkeyUsage = critical, keyCertSign, cRLSign\n' >"${tmp}/ca.ext"
-    if [[ -z "$signer_crt" ]]; then
-      openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=${cn}" -keyout "$key" -out "$out" \
-        >/dev/null 2>&1
-    else
-      openssl req -new -newkey rsa:2048 -nodes -subj "/CN=${cn}" -keyout "$key" -out "${tmp}/ca.csr" >/dev/null 2>&1
-      openssl x509 -req -in "${tmp}/ca.csr" -CA "$signer_crt" -CAkey "$signer_key" -CAcreateserial \
-        -days 30 -extfile "${tmp}/ca.ext" -out "$out" >/dev/null 2>&1
-    fi
-  }
   r="${tmp}/rsa"
   mkdir -p "$r"
-  rsa_ca "Fake ISRG Root X1" "${r}/x1.key" "${r}/x1.crt"
-  rsa_ca "Fake Root YR" "${r}/yr.key" "${r}/yr-cross.crt" "${r}/x1.crt" "${r}/x1.key"
-  rsa_ca "Fake YR2" "${r}/yr2.key" "${r}/yr2.crt" "${r}/yr-cross.crt" "${r}/yr.key"
+  openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=Fake YR2" \
+    -keyout "${r}/yr2.key" -out "${r}/yr2.crt" >/dev/null 2>&1
 
   VPN_DOMAIN=rsa.example.com
   VPN_CLIENTS_DIR="${tmp}/rsa-clients"
@@ -624,7 +611,7 @@ PY
     -keyout "${live}/privkey.pem" -out "${r}/leaf.csr" >/dev/null 2>&1
   openssl x509 -req -in "${r}/leaf.csr" -CA "${r}/yr2.crt" -CAkey "${r}/yr2.key" -CAcreateserial \
     -days 90 -out "${live}/cert.pem" >/dev/null 2>&1
-  cat "${r}/yr2.crt" "${r}/yr-cross.crt" >"${live}/chain.pem"
+  cp "${r}/yr2.crt" "${live}/chain.pem"
 
   VPN_CERT_KEY_TYPE=rsa
   expect_eq "live key type" "$(live_cert_key_type)" rsa
@@ -633,38 +620,24 @@ PY
   if server_cert_is_current; then fail "RSA cert must not satisfy --key-type ecdsa"; fi
   VPN_CERT_KEY_TYPE=rsa
 
+  mkdir -p "$CACERT_DIR"
+  : >"${CACERT_DIR}/intermediate.crt"
   sync_server_cert >/dev/null
   expect_eq "RSA server key" "$VPN_SERVER_KEY_TYPE" RSA
-  [[ -f "${CACERT_DIR}/intermediate.crt" ]] || fail "RSA server must send its issuer"
-  expect_eq "sent intermediate" "$(cert_common_name "${CACERT_DIR}/intermediate.crt" subject)" "Fake YR2"
-  expect_eq "one intermediate sent" "$(grep -c 'BEGIN CERTIFICATE' "${CACERT_DIR}/intermediate.crt")" 1
+  [[ ! -e "${CACERT_DIR}/intermediate.crt" ]] || fail "RSA server must not send the intermediate"
 
   save_config
   cmd_issue carol >"${r}/issue.out"
   d="${VPN_CLIENTS_DIR}/carol"
   expect_eq "RSA client cert" "$(apple_certificate_type "${d}/carol.crt")" RSA
   [[ -f "${d}/server-ca.crt" ]] || fail "RSA issue writes server-ca.crt"
-  expect_eq "Android anchor" "$(cert_common_name "${d}/server-ca.crt" subject)" "Fake Root YR"
-  openssl verify -partial_chain -CAfile "${d}/server-ca.crt" -untrusted "${CACERT_DIR}/intermediate.crt" \
-    "$SERVER_CRT" >/dev/null || fail "leaf + sent intermediate must chain to server-ca.crt"
+  expect_eq "Android CA is the issuer" "$(cert_common_name "${d}/server-ca.crt" subject)" "Fake YR2"
+  openssl verify -CAfile "${d}/server-ca.crt" "$SERVER_CRT" >/dev/null \
+    || fail "server-ca.crt must verify the server leaf"
   grep -q 'IKEv2/IPSec RSA' "${d}/connection.txt" || fail "Android note names IKEv2/IPSec RSA"
   grep -q 'IPSec identifier carol' "${d}/connection.txt" || fail "Android note gives the IPSec identifier"
   grep -q "Server CA (Android): ${d}/server-ca.crt" "${d}/connection.txt" || fail "connection.txt lists server-ca.crt"
   grep -q 'Server CA: ' "${r}/issue.out" || fail "issue prints server-ca.crt"
-
-  # Older hierarchy (R12 signed by ISRG Root X1): the anchor comes from the system store.
-  rsa_ca "Fake R12" "${r}/r12.key" "${r}/r12.crt" "${r}/x1.crt" "${r}/x1.key"
-  openssl x509 -req -in "${r}/leaf.csr" -CA "${r}/r12.crt" -CAkey "${r}/r12.key" -CAcreateserial \
-    -days 30 -out "${r}/r12-leaf.crt" >/dev/null 2>&1
-  cat "${r}/yr-cross.crt" "${r}/x1.crt" >"${r}/system-bundle.pem"
-  SYSTEM_CA_BUNDLES="${r}/missing.pem ${r}/system-bundle.pem"
-  expect_eq "system store anchor" \
-    "$(android_server_ca_pem "${r}/r12-leaf.crt" "${r}/r12.crt" | cert_common_name /dev/stdin subject)" \
-    "Fake ISRG Root X1"
-  SYSTEM_CA_BUNDLES="${r}/missing.pem"
-  if android_server_ca_pem "${r}/r12-leaf.crt" "${r}/r12.crt" >/dev/null; then
-    fail "missing anchor must be reported"
-  fi
 
   # certbot gets --cert-name with the key type so an existing lineage can switch.
   printf '#!/bin/sh\nif [ "$1" = "--help" ]; then echo "--key-type"; exit 0; fi\nprintf "%%s\\n" "$@" >"%s"\n' \

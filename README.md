@@ -28,8 +28,7 @@ curl -fsSL https://raw.githubusercontent.com/alphajc/swangate/main/get.sh | sudo
 
 - 域名的 AAAA 记录已经指向这台服务器。安装程序会用这条 AAAA 记录，或本机唯一的全局 IPv6。一台机器有多个 IPv6 时再加 `--ipv6`。
 - 80/tcp 没被占用，Let's Encrypt 要用它验证域名。已有有效证书时会跳过这一步。
-- 云厂商安全组放行 IPv6 的 UDP/500、UDP/4500，以及证书申请和续期用的 TCP/80；要用 Android 系统自带 VPN 时再放行 ESP（IP 协议 50）。本机防火墙由安装程序处理。规则见「云主机安全组」。
-- 要用 Android 系统自带 VPN，安装时加 `--key-type rsa`，见「Android」。
+- 云厂商安全组放行 IPv6 的 UDP/500、UDP/4500、ESP（IP 协议 50），以及证书申请和续期用的 TCP/80。本机防火墙由安装程序处理。规则见「云主机安全组」。
 
 ## 命令
 
@@ -76,7 +75,7 @@ curl -fsSL https://raw.githubusercontent.com/alphajc/swangate/main/get.sh | sudo
 | `--backend` | `auto` | `ipsec`（ipsec.conf）或 `swanctl` |
 | `--firewall` | `auto` | `firewalld`、`iptables` 或 `nftables` |
 | `--dataplane` | `auto` | `kernel` 或 `libipsec` |
-| `--key-type` | 现有证书的类型，没有证书时 `ecdsa` | 服务器和客户端证书的密钥类型：`ecdsa` 或 `rsa`。Android 系统自带 VPN 只支持 `rsa` |
+| `--key-type` | 现有证书的类型，没有证书时 `rsa` | 服务器和客户端证书的密钥类型。`rsa` 是 iOS、macOS、Windows 和 Android 都能用的默认值 |
 
 也可以用环境变量传参，例如 `VPN_DOMAIN`、`VPN_IPV6`、`VPN_EMAIL`。
 
@@ -117,7 +116,7 @@ VPN 入口是 IPv6。入站来源填 IPv6；客户端地址不固定时用 `::/0
 | TCP | 80 | 入站 | IPv6 | Let's Encrypt 的 HTTP-01。没有有效证书时安装会用到，之后续期也会用到。已经有证书，并且安装时加了 `--skip-certbot`，这条可以不开放 |
 | ICMPv6 | Packet Too Big（类型 2） | 入站 | IPv6 | 告知路径 MTU。安装程序会钳制 TCP MSS，大包仍然依赖这条 ICMP |
 
-ESP 没有端口。控制台里选「自定义协议」或「协议号」，填 50。不用 Android 系统自带 VPN 时，这条可以不加：其他客户端的 ESP 都封装在 UDP/4500 里。
+ESP 没有端口。控制台里选「自定义协议」或「协议号」，填 50。iOS、macOS 和 Windows 的数据在 UDP/4500 里，Android 系统自带 VPN 走这条 ESP。
 
 管理用的 SSH（常见是 TCP/22）按你自己的来源限制，和 VPN 无关。出站保持默认放行即可，certbot 要能访问 Let's Encrypt。
 
@@ -139,7 +138,7 @@ Let's Encrypt 会顺着域名的 AAAA 记录访问 80/tcp。域名如果同时�
 
 - `alice.mobileconfig`：iOS / macOS 描述文件，已用服务器证书签名，包含客户端证书
 - `alice.p12`：Windows、Android 用；随机口令打印在终端，也写在 `connection.txt`
-- `server-ca.crt`：只在 `--key-type rsa` 时生成，Android 用它校验服务器
+- `server-ca.crt`：签发服务器证书的 Let's Encrypt 中间证书，Android 用它校验服务器
 - `alice.crt`、`alice.key`、`ca.crt`
 
 导入方法：
@@ -152,9 +151,10 @@ Let's Encrypt 会顺着域名的 AAAA 记录访问 80/tcp。域名如果同时�
 
 用系统自带的「IKEv2/IPSec RSA」，不用装 App。需要 Android 11 或更新版本；到 Android 16 字段都没变。下面的菜单名按原版 Android 写，各家手机略有不同，找不到时在设置里搜索「安装证书」或「VPN」。
 
-先确认服务器满足三点：
+一次 `swangate install` 发出的证书是 RSA。iOS、macOS、Windows 和 Android 用同一张服务器证书：Android 系统 VPN 只会做 RSA 签名，另外三个系统也接受 RSA。`sudo swangate status` 里 `Server key` 如果还是 ECDSA（更早的默认），执行 `sudo swangate install --key-type rsa`，再 `sudo swangate update --skip-self --reissue-clients`，然后让 iPhone 和 Mac 重装描述文件。
 
-- 安装时用了 `--key-type rsa`。系统 VPN 只会用 RSA 签名，也只认 RSA 签名的服务器，默认的 ECDSA 证书连不上。已经用 ECDSA 装好的服务器，执行 `sudo swangate install --key-type rsa` 换成 RSA 证书（certbot 会重新申请，需要 80/tcp），再执行 `sudo swangate update --skip-self --reissue-clients` 重签所有客户端。iPhone 和 Mac 要重新安装新的 `.mobileconfig`。
+另外两件事先确认：
+
 - 云安全组放行了 IPv6 的 ESP（IP 协议 50）。系统 VPN 走 IPv6 时不把 ESP 封装进 UDP。
 - 数据通道是 `kernel`，或者是 StrongSwan 5.9.11 及以上的 `libipsec`（`sudo swangate status` 里的 `Dataplane`）。
 
@@ -165,7 +165,7 @@ Let's Encrypt 会顺着域名的 AAAA 记录访问 80/tcp。域名如果同时�
 1. 选「VPN 和应用用户证书」，打开 `alice.p12`，输入口令。
 2. 选「CA 证书」，打开 `server-ca.crt`。系统会提醒网络可能受到监控，这是安装任何自定义 CA 时的固定提示。
 
-`server-ca.crt` 是 Let's Encrypt 中间证书上一级的 CA，现在一般是 `Root YR`，由 ISRG Root X1 交叉签名。服务器每次握手都会附上签发它的中间证书（YR1、YR2 这类会轮换），手机只需要信任上一级，续期后不用重装。`ca.crt` 是签发客户端证书的 CA，不用装到手机上。
+`server-ca.crt` 就是签发这张服务器证书的 Let's Encrypt 中间证书。握手里不附带它，避免 IKE 包变大后在移动 IPv6 上被丢掉。Android 不使用系统信任库，所以要把这张证书装进去。`ca.crt` 是签发客户端证书的 CA，不用装到手机上。Let's Encrypt 轮换中间证书后，`connection.txt` 里的名字会变，重新 `issue` 并把新的 `server-ca.crt` 装一次。
 
 新建 VPN（设置 → 网络和互联网 → VPN → 右上角「+」）：
 

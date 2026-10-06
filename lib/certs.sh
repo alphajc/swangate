@@ -152,29 +152,6 @@ apple_issuer_der_b64() {
   openssl x509 -outform der <<<"$pem" | base64 | tr -d '\r\n'
 }
 
-SYSTEM_CA_BUNDLES="${IKEV2_SYSTEM_CA_BUNDLES:-/etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/ca-bundle.pem /etc/ssl/cert.pem}"
-
-# Prints the CA certificate Android should trust for the server. The server
-# sends LEAF and its issuer, so the anchor is whoever signed that issuer:
-# taken from BUNDLE (e.g. Root YR cross-signed by ISRG Root X1), or else from
-# the system CA store (e.g. ISRG Root X1 above R12).
-android_server_ca_pem() {
-  local leaf="$1"
-  local bundle="$2"
-  local issuer anchor_cn file
-  issuer="$(server_issuer_pem "$leaf" "$bundle")" || return 1
-  anchor_cn="$(cert_common_name /dev/stdin issuer <<<"$issuer")"
-  if [[ "$anchor_cn" == "$(cert_common_name /dev/stdin subject <<<"$issuer")" ]]; then
-    printf '%s\n' "$issuer"
-    return 0
-  fi
-  bundle_cert_by_cn "$anchor_cn" "$bundle" && return 0
-  for file in $SYSTEM_CA_BUNDLES; do
-    bundle_cert_by_cn "$anchor_cn" "$file" && return 0
-  done
-  return 1
-}
-
 # Prints the CN from a certificate subject or issuer (RFC2253).
 cert_common_name() {
   local crt="$1"
@@ -527,19 +504,10 @@ sync_server_cert() {
   fi
   VPN_SERVER_KEY_TYPE="$(detect_key_type "$SERVER_KEY")"
   log "Server certificate matches its ${VPN_SERVER_KEY_TYPE} private key."
-  # ECDSA: keep the intermediate out of cacerts so IKE_AUTH stays small (older
-  # installs put it there). RSA: the Android built-in VPN does not fetch
-  # intermediates, so charon must send the leaf's issuer; that lets phones
-  # trust the stable CA above it while Let's Encrypt rotates YR1/YR2.
+  # Keep the intermediate out of cacerts so IKE_AUTH stays a single leaf.
+  # Sending it forces fragmentation, and many mobile IPv6 paths drop those
+  # fragments. Android gets this issuer as server-ca.crt instead.
   rm -f "${CACERT_DIR}/intermediate.crt"
-  if [[ "$VPN_SERVER_KEY_TYPE" == "RSA" ]]; then
-    if server_issuer_pem "$SERVER_CRT" "$SERVER_CHAIN" >"${CACERT_DIR}/intermediate.crt"; then
-      chmod 644 "${CACERT_DIR}/intermediate.crt"
-    else
-      rm -f "${CACERT_DIR}/intermediate.crt"
-      warn "The server certificate issuer is not in ${SERVER_CHAIN}. Android clients cannot verify the server."
-    fi
-  fi
 }
 
 swanctl_load() {
